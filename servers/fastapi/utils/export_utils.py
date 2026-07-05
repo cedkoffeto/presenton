@@ -1,7 +1,7 @@
 import os
 import logging
 from typing import Literal
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 import uuid
 
 from pathvalidate import sanitize_filename
@@ -40,6 +40,21 @@ def _build_presentation_export_url(
     )
 
 
+def _build_download_url(presentation_id: uuid.UUID, out_path: str) -> str:
+    app_data_directory = (os.getenv("APP_DATA_DIRECTORY") or "").strip()
+    if not app_data_directory:
+        return out_path
+    exports_directory = os.path.join(app_data_directory, "exports")
+    relative_path = os.path.relpath(out_path, exports_directory)
+    if relative_path.startswith("..") or os.path.isabs(relative_path):
+        return out_path
+    return (
+        f"{_get_next_public_url().rstrip('/')}"
+        f"/api/export-presentation/file?id={presentation_id}"
+        f"&name={quote(relative_path)}"
+    )
+
+
 async def export_presentation(
     presentation_id: uuid.UUID,
     title: str,
@@ -71,5 +86,5 @@ async def export_presentation(
     )
     return PresentationAndPath(
         presentation_id=presentation_id,
-        path=export_result.path,
+        path=_build_download_url(presentation_id, export_result.path),
     )

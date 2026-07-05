@@ -2,8 +2,15 @@ from fastapi import Request
 from starlette.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from services.database import async_session_maker
+from utils.access_control import (
+    bootstrap_default_identity,
+    resolve_actor_for_username,
+    resolve_integration_actor,
+)
 from utils.get_env import get_can_change_keys_env, is_disable_auth_enabled
 from utils.simple_auth import (
+    get_configured_auth_username,
     get_auth_status,
     get_basic_auth_credentials_from_request,
     get_session_token_from_request,
@@ -43,17 +50,34 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
         return path in self._PROTECTED_NON_API_PATHS
 
     async def dispatch(self, request: Request, call_next):
-        if is_disable_auth_enabled():
-            return await call_next(request)
-
         path = request.url.path
 
         if (
             request.method == "OPTIONS"
             or not self._requires_auth(path)
             or self._is_exempt(path)
+            or (
+                request.method == "GET"
+                and path.startswith("/api/v1/ppt/presentation/")
+                and bool(request.query_params.get("share_token"))
+            )
+            or path.startswith("/api/v1/ppt/themes/share/")
         ):
             return await call_next(request)
+
+        if is_disable_auth_enabled():
+            async with async_session_maker() as session:
+                actor = await bootstrap_default_identity(session, "electron")
+            request.state.auth_username = actor.user.username
+            request.state.auth_actor = actor
+            return await call_next(request)
+
+        async with async_session_maker() as session:
+            integration_actor = await resolve_integration_actor(request, session)
+            if integration_actor:
+                request.state.auth_username = integration_actor.user.username
+                request.state.auth_actor = integration_actor
+                return await call_next(request)
 
         auth_status = get_auth_status(get_session_token_from_request(request))
         if not auth_status["configured"]:
@@ -70,7 +94,15 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
             if basic_credentials and verify_credentials(
                 basic_credentials[0], basic_credentials[1]
             ):
-                request.state.auth_username = basic_credentials[0].strip()
+                username = basic_credentials[0].strip()
+                async with async_session_maker() as session:
+                    actor = await resolve_actor_for_username(
+                        session,
+                        username,
+                        allow_bootstrap_admin=username == (get_configured_auth_username() or "").strip(),
+                    )
+                request.state.auth_username = username
+                request.state.auth_actor = actor
                 return await call_next(request)
 
             return JSONResponse(
@@ -78,5 +110,13 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Unauthorized"},
             )
 
-        request.state.auth_username = auth_status.get("username")
+        username = auth_status.get("username")
+        async with async_session_maker() as session:
+            actor = await resolve_actor_for_username(
+                session,
+                username,
+                allow_bootstrap_admin=username == (get_configured_auth_username() or "").strip(),
+            )
+        request.state.auth_username = username
+        request.state.auth_actor = actor
         return await call_next(request)

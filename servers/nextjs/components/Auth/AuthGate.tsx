@@ -11,6 +11,7 @@ type AuthStatus = {
   configured: boolean;
   authenticated: boolean;
   username: string | null;
+  oidc_enabled?: boolean;
 };
 
 const initialStatus: AuthStatus = {
@@ -92,6 +93,7 @@ export default function AuthGate() {
         configured: Boolean(data.configured),
         authenticated: Boolean(data.authenticated),
         username: data.username ?? null,
+        oidc_enabled: Boolean(data.oidc_enabled),
       });
     } catch (fetchError) {
       console.error(fetchError);
@@ -270,6 +272,17 @@ export default function AuthGate() {
         </p>
 
         <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+          {!isSetupMode && status.oidc_enabled ? (
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = getApiUrl("/api/v1/auth/oidc/start");
+              }}
+              className="w-full rounded-[58px] border border-[#D9DBE8] bg-white px-5 py-3 font-syne text-xs font-semibold text-black transition hover:bg-[#F8F8FB]"
+            >
+              Continue with SSO
+            </button>
+          ) : null}
           <div className="space-y-2">
             <label htmlFor="username" className="block font-syne text-sm font-medium text-black">
               Username

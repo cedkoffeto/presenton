@@ -10,6 +10,18 @@ const CONTENT_TYPES: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+function getFastApiBaseUrl(): string {
+  const internal = process.env.FAST_API_INTERNAL_URL?.trim();
+  if (internal) {
+    return internal.replace(/\/+$/, "");
+  }
+  const configured = process.env.NEXT_PUBLIC_FAST_API?.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+  return "http://127.0.0.1:8000";
+}
+
 function getExportsDirectory(): string {
   const appDataDirectory = process.env.APP_DATA_DIRECTORY?.trim();
   if (!appDataDirectory) {
@@ -40,11 +52,38 @@ function contentDisposition(filename: string): string {
 
 export async function GET(request: NextRequest) {
   const filename = getSafeExportName(request);
+  const presentationId = request.nextUrl.searchParams.get("id")?.trim();
+  const shareToken = request.nextUrl.searchParams.get("share_token")?.trim();
   if (!filename) {
     return NextResponse.json({ error: "Invalid export file name" }, { status: 400 });
   }
+  if (!presentationId) {
+    return NextResponse.json(
+      { error: "Missing presentation id" },
+      { status: 400 }
+    );
+  }
 
   try {
+    const presentationUrl = new URL(
+      `${getFastApiBaseUrl()}/api/v1/ppt/presentation/${encodeURIComponent(
+        presentationId
+      )}`
+    );
+    if (shareToken) {
+      presentationUrl.searchParams.set("share_token", shareToken);
+    }
+    const authResponse = await fetch(presentationUrl, {
+      method: "GET",
+      headers: request.headers.get("cookie")
+        ? { cookie: request.headers.get("cookie") as string }
+        : undefined,
+      cache: "no-store",
+    });
+    if (!authResponse.ok) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: authResponse.status });
+    }
+
     const exportsDirectory = getExportsDirectory();
     const resolvedExportsDirectory = await fsPromises.realpath(exportsDirectory);
     const filePath = path.join(exportsDirectory, filename);

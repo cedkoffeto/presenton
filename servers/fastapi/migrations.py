@@ -145,6 +145,11 @@ def _is_unversioned_populated_database(database_url: str) -> bool:
         "webhook_subscriptions",
         "template_create_infos",
         "chat_history_messages",
+        "users",
+        "teams",
+        "team_memberships",
+        "integration_clients",
+        "themes",
     }
     engine = create_engine(database_url)
     try:

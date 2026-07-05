@@ -38,6 +38,12 @@ from services.mem0_presentation_memory_service import (
 )
 from utils.dict_utils import deep_update
 from utils.export_utils import export_presentation
+from utils.access_control import (
+    VISIBILITY_PRIVATE,
+    apply_actor_ownership,
+    generate_share_token,
+    require_resource_access,
+)
 from utils.llm_calls.generate_presentation_outlines import (
     generate_ppt_outline,
     get_messages as get_outline_messages,
@@ -84,6 +90,7 @@ from utils.simple_auth import (
 from utils.web_search import get_selected_web_search_provider, get_web_search_route
 from models.presentation_layout import PresentationLayoutModel
 import uuid
+from utils.request_auth import get_request_actor
 
 logger = logging.getLogger(__name__)
 
@@ -172,13 +179,37 @@ def _build_export_cookie_header(request: Request) -> Optional[str]:
     return None
 
 
+def _build_public_share_path(presentation: PresentationModel) -> Optional[str]:
+    if presentation.visibility != "public" or not presentation.share_token:
+        return None
+    return f"/presentation?id={presentation.id}&share_token={presentation.share_token}"
+
+
+def _optional_request_actor(request: Optional[Request]):
+    if request is None:
+        return None
+    state = getattr(request, "state", None)
+    return getattr(state, "auth_actor", None)
+
+
 @PRESENTATION_ROUTER.get("/all", response_model=List[PresentationWithSlides])
-async def get_all_presentations(sql_session: AsyncSession = Depends(get_async_session)):
+async def get_all_presentations(
+    request: Request, sql_session: AsyncSession = Depends(get_async_session)
+):
+    actor = get_request_actor(request)
     query = (
         select(PresentationModel, SlideModel)
         .join(
             SlideModel,
             (SlideModel.presentation == PresentationModel.id) & (SlideModel.index == 0),
+        )
+        .where(
+            (PresentationModel.owner_user_id == actor.owner_user_id)
+            | (
+                (PresentationModel.visibility == "team")
+                & (PresentationModel.team_id == actor.team_id)
+            )
+            | (PresentationModel.visibility == "public")
         )
         .order_by(PresentationModel.created_at.desc())
     )
@@ -201,11 +232,24 @@ async def get_all_presentations(sql_session: AsyncSession = Depends(get_async_se
 
 @PRESENTATION_ROUTER.get("/{id}", response_model=PresentationWithSlides)
 async def get_presentation(
-    id: uuid.UUID, sql_session: AsyncSession = Depends(get_async_session)
+    id: uuid.UUID,
+    request: Request,
+    share_token: Optional[str] = None,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
     presentation = await sql_session.get(PresentationModel, id)
     if not presentation:
         raise HTTPException(404, "Presentation not found")
+    if share_token and presentation.share_token == share_token and presentation.visibility == "public":
+        actor = None
+    else:
+        actor = get_request_actor(request)
+        require_resource_access(
+            actor,
+            owner_user_id=presentation.owner_user_id,
+            team_id=presentation.team_id,
+            visibility=presentation.visibility,
+        )
     slides_result = await sql_session.scalars(
         select(SlideModel)
         .where(SlideModel.presentation == id)
@@ -222,11 +266,20 @@ async def get_presentation(
 
 @PRESENTATION_ROUTER.delete("/{id}", status_code=204)
 async def delete_presentation(
-    id: uuid.UUID, sql_session: AsyncSession = Depends(get_async_session)
+    id: uuid.UUID,
+    request: Request,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request)
     presentation = await sql_session.get(PresentationModel, id)
     if not presentation:
         raise HTTPException(404, "Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     await sql_session.delete(presentation)
     await sql_session.commit()
@@ -234,6 +287,7 @@ async def delete_presentation(
 
 @PRESENTATION_ROUTER.post("/create", response_model=PresentationModel)
 async def create_presentation(
+    request_http: Request,
     content: Annotated[str, Body()],
     n_slides: Annotated[Optional[int], Body()] = None,
     language: Annotated[Optional[str], Body()] = None,
@@ -246,6 +300,7 @@ async def create_presentation(
     web_search: Annotated[bool, Body()] = False,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = _optional_request_actor(request_http) or get_request_actor(request_http)
 
     if n_slides is not None and n_slides < 1:
         raise HTTPException(
@@ -287,7 +342,9 @@ async def create_presentation(
         include_table_of_contents=include_table_of_contents,
         include_title_slide=include_title_slide,
         web_search=web_search,
+        share_token=generate_share_token(),
     )
+    apply_actor_ownership(presentation, actor, VISIBILITY_PRIVATE)
 
     sql_session.add(presentation)
     await sql_session.commit()
@@ -312,18 +369,26 @@ async def create_presentation(
 
 @PRESENTATION_ROUTER.post("/prepare", response_model=PresentationModel)
 async def prepare_presentation(
+    request_http: Request,
     presentation_id: Annotated[uuid.UUID, Body()],
     outlines: Annotated[List[SlideOutlineModel], Body()],
     layout: Annotated[PresentationLayoutModel, Body()],
     title: Annotated[Optional[str], Body()] = None,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = _optional_request_actor(request_http) or get_request_actor(request_http)
     if not outlines:
         raise HTTPException(status_code=400, detail="Outlines are required")
 
     presentation = await sql_session.get(PresentationModel, presentation_id)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     presentation_outline_model = PresentationOutlineModel(slides=outlines)
 
@@ -577,6 +642,9 @@ async def stream_presentation(
                 )
                 continue
             generated_assets.extend(assets_list)
+        if actor is not None:
+            for asset in generated_assets:
+                apply_actor_ownership(asset, actor, presentation.visibility)
 
         # Moved this here to make sure new slides are generated before deleting the old ones
         await sql_session.execute(
@@ -664,6 +732,7 @@ async def update_presentation(
     )
 async def check_if_api_request_is_valid(
     request: GeneratePresentationRequest,
+    actor=None,
     sql_session: AsyncSession = Depends(get_async_session),
 ) -> Tuple[uuid.UUID,]:
     presentation_id = uuid.uuid4()
@@ -711,6 +780,13 @@ async def check_if_api_request_is_valid(
             template = await sql_session.get(TemplateModel, uuid.UUID(template_id))
             if not template:
                 raise Exception()
+            if actor is not None:
+                require_resource_access(
+                    actor,
+                    owner_user_id=template.owner_user_id,
+                    team_id=template.team_id,
+                    visibility=template.visibility,
+                )
         except Exception:
             raise HTTPException(
                 status_code=400,
@@ -723,7 +799,8 @@ async def check_if_api_request_is_valid(
 async def generate_presentation_handler(
     request: GeneratePresentationRequest,
     presentation_id: uuid.UUID,
-    async_status: Optional[AsyncPresentationGenerationTaskModel],
+    actor=None,
+    async_status: Optional[AsyncPresentationGenerationTaskModel] = None,
     export_cookie_header: Optional[str] = None,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
@@ -953,7 +1030,10 @@ async def generate_presentation_handler(
             tone=request.tone.value,
             verbosity=request.verbosity.value,
             instructions=request.instructions,
+            share_token=generate_share_token(),
         )
+        if actor is not None:
+            apply_actor_ownership(presentation, actor, VISIBILITY_PRIVATE)
 
         # Updating async status
         if async_status:
@@ -1040,6 +1120,9 @@ async def generate_presentation_handler(
         generated_assets = []
         for assets_list in generated_assets_list:
             generated_assets.extend(assets_list)
+        if actor is not None:
+            for asset in generated_assets:
+                apply_actor_ownership(asset, actor, presentation.visibility)
 
         # 8. Save PresentationModel and Slides
         sql_session.add(presentation)
@@ -1063,6 +1146,8 @@ async def generate_presentation_handler(
         response = PresentationPathAndEditPath(
             **presentation_and_path.model_dump(),
             edit_path=f"/presentation?id={presentation_id}",
+            download_url=presentation_and_path.path,
+            public_share_url=_build_public_share_path(presentation),
         )
 
         if async_status:
@@ -1117,10 +1202,12 @@ async def generate_presentation_sync(
     sql_session: AsyncSession = Depends(get_async_session),
 ):
     try:
-        (presentation_id,) = await check_if_api_request_is_valid(request, sql_session)
+        actor = _optional_request_actor(request_http)
+        (presentation_id,) = await check_if_api_request_is_valid(request, actor, sql_session)
         return await generate_presentation_handler(
             request,
             presentation_id,
+            actor,
             None,
             export_cookie_header=_build_export_cookie_header(request_http),
             sql_session=sql_session,
@@ -1142,13 +1229,16 @@ async def generate_presentation_async(
     sql_session: AsyncSession = Depends(get_async_session),
 ):
     try:
-        (presentation_id,) = await check_if_api_request_is_valid(request, sql_session)
+        actor = _optional_request_actor(request_http)
+        (presentation_id,) = await check_if_api_request_is_valid(request, actor, sql_session)
 
         async_status = AsyncPresentationGenerationTaskModel(
             status="pending",
             message="Queued for generation",
             data=None,
         )
+        if actor is not None:
+            apply_actor_ownership(async_status, actor, VISIBILITY_PRIVATE)
         sql_session.add(async_status)
         await sql_session.commit()
 
@@ -1156,6 +1246,7 @@ async def generate_presentation_async(
             generate_presentation_handler,
             request,
             presentation_id,
+            actor,
             async_status=async_status,
             export_cookie_header=_build_export_cookie_header(request_http),
             sql_session=sql_session,
@@ -1174,14 +1265,22 @@ async def generate_presentation_async(
     "/status/{id}", response_model=AsyncPresentationGenerationTaskModel
 )
 async def check_async_presentation_generation_status(
+    request: Request,
     id: str = Path(description="ID of the presentation generation task"),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request)
     status = await sql_session.get(AsyncPresentationGenerationTaskModel, id)
     if not status:
         raise HTTPException(
             status_code=404, detail="No presentation generation task found"
         )
+    require_resource_access(
+        actor,
+        owner_user_id=status.owner_user_id,
+        team_id=status.team_id,
+        visibility=status.visibility,
+    )
     return status
 
 
@@ -1191,9 +1290,16 @@ async def edit_presentation_with_new_content(
     data: Annotated[EditPresentationRequest, Body()],
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     presentation = await sql_session.get(PresentationModel, data.presentation_id)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     slides = await sql_session.scalars(
         select(SlideModel).where(SlideModel.presentation == data.presentation_id)
@@ -1230,6 +1336,8 @@ async def edit_presentation_with_new_content(
     return PresentationPathAndEditPath(
         **presentation_and_path.model_dump(),
         edit_path=f"/presentation?id={presentation.id}",
+        download_url=presentation_and_path.path,
+        public_share_url=_build_public_share_path(presentation),
     )
 
 
@@ -1239,15 +1347,24 @@ async def derive_presentation_from_existing_one(
     data: Annotated[EditPresentationRequest, Body()],
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     presentation = await sql_session.get(PresentationModel, data.presentation_id)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     slides = await sql_session.scalars(
         select(SlideModel).where(SlideModel.presentation == data.presentation_id)
     )
 
     new_presentation = presentation.get_new_presentation()
+    new_presentation.share_token = generate_share_token()
+    apply_actor_ownership(new_presentation, actor, VISIBILITY_PRIVATE)
     new_slides = []
     for each_slide in slides:
         updated_content = None
@@ -1274,4 +1391,6 @@ async def derive_presentation_from_existing_one(
     return PresentationPathAndEditPath(
         **presentation_and_path.model_dump(),
         edit_path=f"/presentation?id={new_presentation.id}",
+        download_url=presentation_and_path.path,
+        public_share_url=_build_public_share_path(new_presentation),
     )

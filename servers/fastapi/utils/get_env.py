@@ -319,6 +319,42 @@ def get_comfyui_workflow_env():
     return os.getenv("COMFYUI_WORKFLOW")
 
 
+def get_default_team_slug_env():
+    return os.getenv("DEFAULT_TEAM_SLUG")
+
+
+def get_default_team_name_env():
+    return os.getenv("DEFAULT_TEAM_NAME")
+
+
+def get_oidc_issuer_url_env():
+    return os.getenv("OIDC_ISSUER_URL")
+
+
+def get_oidc_client_id_env():
+    return os.getenv("OIDC_CLIENT_ID")
+
+
+def get_oidc_client_secret_env():
+    return os.getenv("OIDC_CLIENT_SECRET")
+
+
+def get_oidc_redirect_uri_env():
+    return os.getenv("OIDC_REDIRECT_URI")
+
+
+def get_oidc_scopes_env():
+    return os.getenv("OIDC_SCOPES")
+
+
+def is_oidc_enabled():
+    return bool(
+        (get_oidc_issuer_url_env() or "").strip()
+        and (get_oidc_client_id_env() or "").strip()
+        and (get_oidc_redirect_uri_env() or "").strip()
+    )
+
+
 # Dalle 3 Quality
 def get_dall_e_3_quality_env():
     return os.getenv("DALL_E_3_QUALITY")

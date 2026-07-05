@@ -147,5 +147,5 @@ COPY scripts/presenton-terminal-banner.mjs /app/scripts/presenton-terminal-banne
 COPY scripts/user-config-env.mjs /app/scripts/user-config-env.mjs
 COPY nginx.conf /etc/nginx/nginx.conf
 
-EXPOSE 80
+EXPOSE 8080
 CMD ["node", "/app/start.js"]

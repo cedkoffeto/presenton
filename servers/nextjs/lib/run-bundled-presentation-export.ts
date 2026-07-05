@@ -151,8 +151,12 @@ async function ensureExportFileReadable(filePath: string): Promise<void> {
     throw new Error("Export finished but output path is not a file.");
   }
 
-  await fs.chmod(path.dirname(filePath), EXPORT_DIRECTORY_MODE);
-  await fs.chmod(filePath, EXPORT_FILE_MODE);
+  try {
+    await fs.chmod(path.dirname(filePath), EXPORT_DIRECTORY_MODE);
+    await fs.chmod(filePath, EXPORT_FILE_MODE);
+  } catch {
+    // OpenShift/random-UID deployments may not allow chmod on mounted files.
+  }
 }
 
 /**

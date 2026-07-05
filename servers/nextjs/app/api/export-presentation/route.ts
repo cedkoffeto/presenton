@@ -29,7 +29,7 @@ async function readExportRequestBody(req: NextRequest): Promise<{
   return parsed as { format?: unknown; id?: unknown; title?: unknown };
 }
 
-function buildExportDownloadUrl(outPath: string): string {
+function buildExportDownloadUrl(outPath: string, presentationId: string): string {
   const appDataDirectory = process.env.APP_DATA_DIRECTORY?.trim();
   if (!appDataDirectory) {
     throw new Error("APP_DATA_DIRECTORY is required to download exported files.");
@@ -45,7 +45,9 @@ function buildExportDownloadUrl(outPath: string): string {
     throw new Error("Export finished outside the configured exports directory.");
   }
 
-  return `/api/export-presentation/file?name=${encodeURIComponent(relativePath)}`;
+  return `/api/export-presentation/file?id=${encodeURIComponent(
+    presentationId
+  )}&name=${encodeURIComponent(relativePath)}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -99,7 +101,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      path: buildExportDownloadUrl(outPath),
+      path: buildExportDownloadUrl(outPath, id.trim()),
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

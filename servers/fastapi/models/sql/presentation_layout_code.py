@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from sqlalchemy import JSON, Column, DateTime, Text
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Text
 from sqlmodel import Field, SQLModel
 
 from utils.datetime_utils import get_current_utc_datetime
@@ -13,6 +13,22 @@ class PresentationLayoutCodeModel(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     presentation: uuid.UUID = Field(index=True, description="UUID of the presentation")
+    owner_user_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("users.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
+    )
+    team_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("teams.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
+    )
     layout_id: str = Field(description="Unique identifier for the layout")
     layout_name: str = Field(description="Display name of the layout")
     layout_code: str = Field(

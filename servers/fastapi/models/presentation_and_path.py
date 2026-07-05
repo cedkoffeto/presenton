@@ -9,3 +9,5 @@ class PresentationAndPath(BaseModel):
 
 class PresentationPathAndEditPath(PresentationAndPath):
     edit_path: str
+    download_url: str | None = None
+    public_share_url: str | None = None

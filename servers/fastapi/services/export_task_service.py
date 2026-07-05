@@ -224,6 +224,8 @@ class ExportTaskService:
             os.chmod(os.path.dirname(output_path), EXPORT_DIRECTORY_MODE)
             os.chmod(output_path, EXPORT_FILE_MODE)
         except OSError as exc:
+            if exc.errno is not None:
+                return
             raise HTTPException(
                 status_code=500,
                 detail=f"Export completed but output permissions could not be updated: {exc}",

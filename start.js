@@ -61,9 +61,20 @@ const appDataStaticDirectories = [
   "pptx-to-html",
 ].map((name) => join(appDataDirectory, name));
 
+const safeChmodSync = (targetPath, mode) => {
+  try {
+    chmodSync(targetPath, mode);
+  } catch (error) {
+    if (error && ["EPERM", "EACCES", "EROFS"].includes(error.code)) {
+      return;
+    }
+    throw error;
+  }
+};
+
 const ensureReadableDirectory = (dirPath) => {
   mkdirSync(dirPath, { recursive: true, mode: appDataDirectoryMode });
-  chmodSync(dirPath, appDataDirectoryMode);
+  safeChmodSync(dirPath, appDataDirectoryMode);
 };
 
 const ensureReadableExportFiles = (dirPath) => {
@@ -71,10 +82,10 @@ const ensureReadableExportFiles = (dirPath) => {
     const entryPath = join(dirPath, entry.name);
 
     if (entry.isDirectory()) {
-      chmodSync(entryPath, appDataDirectoryMode);
+      safeChmodSync(entryPath, appDataDirectoryMode);
       ensureReadableExportFiles(entryPath);
     } else if (entry.isFile()) {
-      chmodSync(entryPath, 0o644);
+      safeChmodSync(entryPath, 0o644);
     }
   }
 };
@@ -114,7 +125,7 @@ const copyUserConfigBackup = () => {
   try {
     if (readJsonConfig(userConfigPath)) {
       copyFileSync(userConfigPath, userConfigBackupPath);
-      chmodSync(userConfigBackupPath, 0o644);
+      safeChmodSync(userConfigBackupPath, 0o644);
     }
   } catch (error) {
     console.warn("Failed to update user config backup:", error);
@@ -136,7 +147,7 @@ const writeUserConfig = (config) => {
 
   try {
     renameSync(tempPath, userConfigPath);
-    chmodSync(userConfigPath, 0o644);
+    safeChmodSync(userConfigPath, 0o644);
     if (!existsSync(userConfigBackupPath)) {
       copyUserConfigBackup();
     }
@@ -606,25 +617,36 @@ const startServers = async (nginxReadyPromise) => {
 // Start nginx service (reverse proxy: see nginx.conf listen + upstream ports)
 const startNginx = () => {
   return new Promise((resolve) => {
-    const nginxProcess = spawn("service", ["nginx", "start"], {
-      stdio: "inherit",
+    let resolved = false;
+    const resolveOnce = (value) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(value);
+      }
+    };
+    const nginxProcess = spawn("nginx", ["-g", "daemon off;"], {
+      stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
     });
 
     nginxProcess.on("error", (err) => {
       console.error("Nginx process failed to start:", err);
-      resolve(false);
+      resolveOnce(false);
     });
 
     nginxProcess.on("exit", (code) => {
-      if (code === 0) {
+      if (code === 0 && !resolved) {
         console.log("Nginx started successfully");
-        resolve(true);
+        resolveOnce(true);
       } else {
         console.error(`Nginx failed to start with exit code: ${code}`);
-        resolve(false);
+        resolveOnce(false);
       }
     });
+
+    forwardProcessOutput(nginxProcess.stdout, process.stdout);
+    forwardProcessOutput(nginxProcess.stderr, process.stderr);
+    setTimeout(() => resolveOnce(true), 500);
   });
 };
 

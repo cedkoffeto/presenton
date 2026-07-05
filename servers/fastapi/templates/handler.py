@@ -6,9 +6,9 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, List, Optional
 
 import aiohttp
-from fastapi import Body, Depends, File, Form, HTTPException, Path, Query, UploadFile
+from fastapi import Body, Depends, File, Form, HTTPException, Path, Query, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete, select
 
@@ -43,10 +43,19 @@ from templates.slide_layout_jobs import (
     start_slide_layout_job,
     get_slide_layout_job,
 )
+from utils.access_control import (
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_TEAM,
+    apply_actor_ownership,
+    generate_share_token,
+    require_resource_access,
+)
 from utils.asset_directory_utils import (
     resolve_app_path_to_filesystem,
     resolve_image_path_to_filesystem,
 )
+from utils.request_auth import get_request_actor
 
 
 LAYOUT_CODE_REPAIR_ATTEMPTS = 3
@@ -383,11 +392,13 @@ async def _read_image_bytes_and_media_type(image_url: str) -> tuple[bytes, str]:
 
 
 async def get_all_templates(
+    request: Request,
     include_defaults: bool = Query(
         default=True, description="Whether to include default templates"
     ),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request)
     result = await sql_session.execute(
         select(
             TemplateModel.id,
@@ -397,6 +408,16 @@ async def get_all_templates(
         .join(
             PresentationLayoutCodeModel,
             PresentationLayoutCodeModel.presentation == TemplateModel.id,
+        )
+        .where(
+            or_(
+                TemplateModel.owner_user_id == actor.owner_user_id,
+                TemplateModel.visibility == VISIBILITY_PUBLIC,
+                (
+                    (TemplateModel.visibility == VISIBILITY_TEAM)
+                    & (TemplateModel.team_id == actor.team_id)
+                ),
+            )
         )
         .group_by(TemplateModel.id, TemplateModel.name)
     )
@@ -420,9 +441,11 @@ async def get_all_templates(
 
 
 async def get_layouts(
+    request: Request,
     template_id: str = Path(..., description="The id of the template"),
     session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request)
     if not template_id or not template_id.strip():
         raise HTTPException(status_code=400, detail="Template ID cannot be empty")
 
@@ -447,6 +470,12 @@ async def get_layouts(
     template_meta = await session.get(TemplateModel, template_id_uuid)
     template = None
     if template_meta:
+        require_resource_access(
+            actor,
+            owner_user_id=template_meta.owner_user_id,
+            team_id=template_meta.team_id,
+            visibility=template_meta.visibility,
+        )
         template = TemplateData(
             id=template_id_uuid,
             init_id=None,
@@ -473,6 +502,7 @@ async def get_layouts(
 
 
 async def get_template_by_id(
+    request: Request,
     id: str = Path(
         ...,
         description=f"The id of the template, must be one of {', '.join(DEFAULT_TEMPLATES)} or your custom template",
@@ -480,6 +510,7 @@ async def get_template_by_id(
     sql_session: AsyncSession = Depends(get_async_session),
 ):
     if id.startswith("custom-"):
+        actor = get_request_actor(request)
         try:
             template_id = uuid.UUID(id.replace("custom-", ""))
         except Exception as exc:
@@ -495,17 +526,25 @@ async def get_template_by_id(
                 detail="Template not found. Please use a valid template.",
             )
 
+        require_resource_access(
+            actor,
+            owner_user_id=template.owner_user_id,
+            team_id=template.team_id,
+            visibility=template.visibility,
+        )
+
     return await get_layout_by_name(id)
 
 
 async def get_template_example(
+    request: Request,
     id: str = Path(
         ...,
         description=f"The id of the template, must be one of {', '.join(DEFAULT_TEMPLATES)} or your custom template",
     ),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
-    template = await get_template_by_id(id=id, sql_session=sql_session)
+    template = await get_template_by_id(request=request, id=id, sql_session=sql_session)
     return TemplateExample(**build_template_example(id, template))
 
 
@@ -525,9 +564,11 @@ async def upload_fonts_and_slides_preview(
 
 
 async def init_create_template(
+    request_http: Request,
     request: CreateTemplateInitRequest,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     if not request.slide_image_urls:
         raise HTTPException(
             status_code=400, detail="At least one slide image is required"
@@ -562,6 +603,7 @@ async def init_create_template(
         slide_image_urls=request.slide_image_urls,
         slide_htmls=slide_htmls,
     )
+    apply_actor_ownership(template_create_info, actor, VISIBILITY_PRIVATE)
     sql_session.add(template_create_info)
     await sql_session.commit()
     await sql_session.refresh(template_create_info)
@@ -570,11 +612,18 @@ async def init_create_template(
 
 async def _create_slide_layout_impl(
     sql_session: AsyncSession,
+    actor,
     request: CreateSlideLayoutRequest,
 ) -> CreateSlideLayoutResponse:
     template_info = await sql_session.get(TemplateCreateInfoModel, request.id)
     if not template_info:
         raise HTTPException(status_code=400, detail="Template not found")
+    require_resource_access(
+        actor,
+        owner_user_id=template_info.owner_user_id,
+        team_id=template_info.team_id,
+        visibility=template_info.visibility,
+    )
 
     total_slides = len(template_info.slide_htmls)
     if request.index < 0 or request.index >= total_slides:
@@ -610,20 +659,24 @@ async def _create_slide_layout_impl(
 
 
 async def create_slide_layout(
+    request_http: Request,
     request: CreateSlideLayoutRequest = Body(...),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
-    return await _create_slide_layout_impl(sql_session, request)
+    actor = get_request_actor(request_http)
+    return await _create_slide_layout_impl(sql_session, actor, request)
 
 
 async def create_slide_layout_job_start(
+    request_http: Request,
     request: CreateSlideLayoutRequest = Body(...),
 ):
+    actor = get_request_actor(request_http)
     req = request.model_copy()
 
     async def work() -> str:
         async with async_session_maker() as session:
-            result = await _create_slide_layout_impl(session, req)
+            result = await _create_slide_layout_impl(session, actor, req)
             return result.react_component
 
     job_id = await start_slide_layout_job(work)
@@ -689,15 +742,23 @@ async def edit_slide_layout_section(
 
 
 async def save_template(
+    request_http: Request,
     request: SaveTemplateRequest,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     if not request.layouts:
         raise HTTPException(status_code=400, detail="Layouts are required")
 
     template_info = await sql_session.get(TemplateCreateInfoModel, request.template_info_id)
     if not template_info:
         raise HTTPException(status_code=400, detail="Template info not found")
+    require_resource_access(
+        actor,
+        owner_user_id=template_info.owner_user_id,
+        team_id=template_info.team_id,
+        visibility=template_info.visibility,
+    )
 
     validated_layouts: list[tuple[SaveTemplateLayoutData, ValidatedLayoutCode]] = []
     for layout in request.layouts:
@@ -709,13 +770,17 @@ async def save_template(
         id=uuid.uuid4(),
         name=request.name,
         description=request.description,
+        share_token=generate_share_token(),
     )
+    apply_actor_ownership(template, actor, VISIBILITY_PRIVATE)
     sql_session.add(template)
 
     sql_session.add_all(
         [
             PresentationLayoutCodeModel(
                 presentation=template.id,
+                owner_user_id=actor.owner_user_id,
+                team_id=actor.team_id,
                 layout_id=validated.layout_id or layout.layout_id,
                 layout_name=validated.layout_name or layout.layout_name,
                 layout_code=validated.layout_code,
@@ -736,9 +801,11 @@ async def save_template(
 
 
 async def clone_template(
+    request_http: Request,
     request: CloneTemplateRequest = Body(...),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     if not request.id or not request.id.strip():
         raise HTTPException(status_code=400, detail="Template ID cannot be empty")
 
@@ -753,6 +820,13 @@ async def clone_template(
             status_code=400,
             detail="Template not found. Please use a valid template.",
         )
+
+    require_resource_access(
+        actor,
+        owner_user_id=template.owner_user_id,
+        team_id=template.team_id,
+        visibility=template.visibility,
+    )
 
     result = await sql_session.execute(
         select(PresentationLayoutCodeModel).where(
@@ -769,13 +843,17 @@ async def clone_template(
         description=template.description
         if request.description is None
         else request.description,
+        share_token=generate_share_token(),
     )
+    apply_actor_ownership(new_template, actor, VISIBILITY_PRIVATE)
     sql_session.add(new_template)
 
     sql_session.add_all(
         [
             PresentationLayoutCodeModel(
                 presentation=new_template.id,
+                owner_user_id=actor.owner_user_id,
+                team_id=actor.team_id,
                 layout_id=layout.layout_id,
                 layout_name=layout.layout_name,
                 layout_code=layout.layout_code,
@@ -796,15 +874,23 @@ async def clone_template(
 
 
 async def update_template(
+    request_http: Request,
     request: UpdateTemplateRequest,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     if not request.layouts:
         raise HTTPException(status_code=400, detail="Layouts are required")
 
     template = await sql_session.get(TemplateModel, request.id)
     if not template:
         raise HTTPException(status_code=400, detail="Template not found")
+    require_resource_access(
+        actor,
+        owner_user_id=template.owner_user_id,
+        team_id=template.team_id,
+        visibility=template.visibility,
+    )
 
     validated_layouts: list[tuple[SaveTemplateLayoutData, ValidatedLayoutCode]] = []
     for layout in request.layouts:
@@ -828,6 +914,8 @@ async def update_template(
         [
             PresentationLayoutCodeModel(
                 presentation=template.id,
+                owner_user_id=actor.owner_user_id,
+                team_id=actor.team_id,
                 layout_id=validated.layout_id or layout.layout_id,
                 layout_name=validated.layout_name or layout.layout_name,
                 layout_code=validated.layout_code,
@@ -847,12 +935,20 @@ async def update_template(
 
 
 async def save_slide_layout(
+    request_http: Request,
     request: SaveSlideLayoutRequest,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     template = await sql_session.get(TemplateModel, request.template_id)
     if not template:
         raise HTTPException(status_code=400, detail="Template not found")
+    require_resource_access(
+        actor,
+        owner_user_id=template.owner_user_id,
+        team_id=template.team_id,
+        visibility=template.visibility,
+    )
 
     layout = await sql_session.scalar(
         select(PresentationLayoutCodeModel).where(
@@ -872,9 +968,11 @@ async def save_slide_layout(
 
 
 async def clone_slide_layout(
+    request_http: Request,
     request: CloneSlideLayoutRequest = Body(...),
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     if not request.template_id or not request.template_id.strip():
         raise HTTPException(status_code=400, detail="Template ID cannot be empty")
 
@@ -886,6 +984,12 @@ async def clone_slide_layout(
     template = await sql_session.get(TemplateModel, template_id_uuid)
     if not template:
         raise HTTPException(status_code=400, detail="Template not found")
+    require_resource_access(
+        actor,
+        owner_user_id=template.owner_user_id,
+        team_id=template.team_id,
+        visibility=template.visibility,
+    )
 
     layout = await sql_session.scalar(
         select(PresentationLayoutCodeModel).where(
@@ -899,6 +1003,8 @@ async def clone_slide_layout(
     new_layout_code, new_layout_id = _update_layout_id_in_code(layout.layout_code)
     new_layout = PresentationLayoutCodeModel(
         presentation=template_id_uuid,
+        owner_user_id=actor.owner_user_id,
+        team_id=actor.team_id,
         layout_id=new_layout_id,
         layout_name=request.layout_name or layout.layout_name,
         layout_code=new_layout_code,

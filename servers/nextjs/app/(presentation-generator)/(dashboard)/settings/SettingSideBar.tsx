@@ -1,12 +1,12 @@
 import React from 'react'
-import { LogOut, Search, Shield } from 'lucide-react'
+import { KeyRound, LogOut, Search, Shield, Users } from 'lucide-react'
 import { IMAGE_PROVIDERS, LLM_PROVIDERS } from '@/utils/providerConstants'
 import { useSelector } from 'react-redux'
 import { RootState } from '@/store/store'
 
-export type SettingsSection = 'text-provider' | 'image-provider' | 'web-search-provider' | 'privacy' | 'session'
+export type SettingsSection = 'text-provider' | 'image-provider' | 'web-search-provider' | 'privacy' | 'api-keys' | 'teams' | 'session'
 
-const SettingSideBar = ({ selectedProvider, setSelectedProvider }: { selectedProvider: SettingsSection, setSelectedProvider: (provider: SettingsSection) => void }) => {
+const SettingSideBar = ({ selectedProvider, setSelectedProvider, showAdminSections }: { selectedProvider: SettingsSection, setSelectedProvider: (provider: SettingsSection) => void, showAdminSections?: boolean }) => {
     const { llm_config } = useSelector((state: RootState) => state.userConfig)
     const textProviderIcon = LLM_PROVIDERS[llm_config.LLM as keyof typeof LLM_PROVIDERS]?.icon
     const imageProviderIcon = IMAGE_PROVIDERS[llm_config.IMAGE_PROVIDER as keyof typeof IMAGE_PROVIDERS]?.icon || '/providers/pexel.png'
@@ -50,6 +50,28 @@ const SettingSideBar = ({ selectedProvider, setSelectedProvider }: { selectedPro
                         </div>
                         <p className='text-[#191919] text-xs font-medium'>Usage Analytics</p>
                     </button>
+                    {showAdminSections ? (
+                        <button
+                            className={`w-full rounded-[6px] p-3 py-4 flex items-center gap-1.5 border ${selectedProvider === 'api-keys' ? 'bg-[#F4F3FF] border-[#D9D6FE]' : 'bg-white border-[#EDEEEF]'}`}
+                            onClick={() => setSelectedProvider('api-keys')}
+                        >
+                            <div className='relative w-6 h-6 rounded-full overflow-hidden border border-[#EDEEEF] flex items-center justify-center bg-white'>
+                                <KeyRound className='w-3.5 h-3.5 text-[#5146E5]' />
+                            </div>
+                            <p className='text-[#191919] text-xs font-medium'>API Keys</p>
+                        </button>
+                    ) : null}
+                    {showAdminSections ? (
+                        <button
+                            className={`w-full rounded-[6px] p-3 py-4 flex items-center gap-1.5 border ${selectedProvider === 'teams' ? 'bg-[#F4F3FF] border-[#D9D6FE]' : 'bg-white border-[#EDEEEF]'}`}
+                            onClick={() => setSelectedProvider('teams')}
+                        >
+                            <div className='relative w-6 h-6 rounded-full overflow-hidden border border-[#EDEEEF] flex items-center justify-center bg-white'>
+                                <Users className='w-3.5 h-3.5 text-[#5146E5]' />
+                            </div>
+                            <p className='text-[#191919] text-xs font-medium'>Teams</p>
+                        </button>
+                    ) : null}
                     <button
                         className={`w-full rounded-[6px] p-3 py-4 flex items-center gap-1.5 border ${selectedProvider === 'session' ? 'bg-[#F4F3FF] border-[#D9D6FE]' : 'bg-white border-[#EDEEEF]'}`}
                         onClick={() => setSelectedProvider('session')}

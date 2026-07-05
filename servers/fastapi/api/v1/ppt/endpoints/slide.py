@@ -1,5 +1,5 @@
 from typing import Annotated, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
@@ -15,6 +15,9 @@ from utils.llm_calls.edit_slide import get_edited_slide_content
 from utils.llm_calls.edit_slide_html import get_edited_slide_html
 from utils.llm_calls.select_slide_type_on_edit import get_slide_layout_from_prompt
 from utils.process_slides import process_old_and_new_slides_and_fetch_assets
+from utils.access_control import require_resource_access
+from utils.access_control import apply_actor_ownership
+from utils.request_auth import get_request_actor
 
 
 SLIDE_ROUTER = APIRouter(prefix="/slide", tags=["Slide"])
@@ -22,16 +25,24 @@ SLIDE_ROUTER = APIRouter(prefix="/slide", tags=["Slide"])
 
 @SLIDE_ROUTER.post("/edit")
 async def edit_slide(
+    request_http: Request,
     id: Annotated[uuid.UUID, Body()],
     prompt: Annotated[str, Body()],
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     slide = await sql_session.get(SlideModel, id)
     if not slide:
         raise HTTPException(status_code=404, detail="Slide not found")
     presentation = await sql_session.get(PresentationModel, slide.presentation)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     memory_context = await MEM0_PRESENTATION_MEMORY_SERVICE.retrieve_context(
         presentation.id,
@@ -66,6 +77,8 @@ async def edit_slide(
         edited_slide_content,
         icon_weight=presentation.get_layout().icon_weight,
     )
+    for asset in new_assets:
+        apply_actor_ownership(asset, actor, presentation.visibility)
 
     # Always assign a new unique id to the slide
     slide.id = uuid.uuid4()
@@ -89,11 +102,13 @@ async def edit_slide(
 
 @SLIDE_ROUTER.post("/edit-html", response_model=SlideModel)
 async def edit_slide_html(
+    request_http: Request,
     id: Annotated[uuid.UUID, Body()],
     prompt: Annotated[str, Body()],
     html: Annotated[Optional[str], Body()] = None,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request_http)
     slide = await sql_session.get(SlideModel, id)
     if not slide:
         raise HTTPException(status_code=404, detail="Slide not found")
@@ -101,6 +116,12 @@ async def edit_slide_html(
     presentation = await sql_session.get(PresentationModel, slide.presentation)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     html_to_edit = html or slide.html_content
     if not html_to_edit:

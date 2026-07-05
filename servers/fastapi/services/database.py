@@ -12,12 +12,17 @@ from models.sql.async_presentation_generation_status import (
 )
 from models.sql.chat_history_message import ChatHistoryMessageModel
 from models.sql.image_asset import ImageAsset
+from models.sql.integration_client import IntegrationClientModel
 from models.sql.key_value import KeyValueSqlModel
 from models.sql.ollama_pull_status import OllamaPullStatus
 from models.sql.presentation_layout_code import PresentationLayoutCodeModel
 from models.sql.presentation import PresentationModel
+from models.sql.team import TeamModel
+from models.sql.team_membership import TeamMembershipModel
 from models.sql.template import TemplateModel
 from models.sql.template_create_info import TemplateCreateInfoModel
+from models.sql.theme import ThemeModel
+from models.sql.user import UserModel
 from models.sql.slide import SlideModel
 from models.sql.webhook_subscription import WebhookSubscription
 from utils.get_env import get_migrate_database_on_startup_env
@@ -55,9 +60,14 @@ async def create_db_and_tables():
                         KeyValueSqlModel.__table__,
                         ChatHistoryMessageModel.__table__,
                         ImageAsset.__table__,
+                        IntegrationClientModel.__table__,
                         PresentationLayoutCodeModel.__table__,
                         TemplateCreateInfoModel.__table__,
+                        TeamModel.__table__,
+                        TeamMembershipModel.__table__,
                         TemplateModel.__table__,
+                        ThemeModel.__table__,
+                        UserModel.__table__,
                         WebhookSubscription.__table__,
                         AsyncPresentationGenerationTaskModel.__table__,
                         OllamaPullStatus.__table__,

@@ -17,6 +17,8 @@ import TextProvider from "./TextProvider";
 import ImageProvider from "./ImageProvider";
 import WebSearchProvider from "./WebSearchProvider";
 import PrivacySettings from "./PrivacySettings";
+import ApiKeyManagement from "./ApiKeyManagement";
+import TeamManagement from "./TeamManagement";
 import {
   IMAGE_PROVIDERS,
   LLM_PROVIDERS,
@@ -38,6 +40,10 @@ interface ButtonState {
   status?: string;
 }
 
+interface AuthStatusSummary {
+  is_admin?: boolean;
+}
+
 const SettingsPage = () => {
   const router = useRouter();
   const pathname = usePathname();
@@ -53,6 +59,7 @@ const SettingsPage = () => {
     text: "Save Configuration",
     showProgress: false,
   });
+  const [authSummary, setAuthSummary] = useState<AuthStatusSummary>({});
 
   const handleTextProviderInputChange = useCallback(
     (value: string | boolean, field: string) => {
@@ -127,6 +134,26 @@ const SettingsPage = () => {
       return false;
     }
   };
+
+  useEffect(() => {
+    const loadAuthSummary = async () => {
+      try {
+        const response = await fetch(getApiUrl("/api/v1/auth/status"), {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          return;
+        }
+        const payload = (await response.json()) as AuthStatusSummary;
+        setAuthSummary(payload);
+      } catch {
+        setAuthSummary({});
+      }
+    };
+
+    void loadAuthSummary();
+  }, []);
   const handleSaveConfig = async () => {
 
     if (llmConfig.LLM === 'codex') {
@@ -348,6 +375,7 @@ const SettingsPage = () => {
         <SettingSideBar
           selectedProvider={selectedProvider}
           setSelectedProvider={selectSettingsSection}
+          showAdminSections={Boolean(authSummary.is_admin)}
         />
         <div className="w-full">
           <div className="sticky top-0 right-0 z-50 py-[28px]   backdrop-blur mb-4 ">
@@ -368,6 +396,12 @@ const SettingsPage = () => {
           {selectedProvider === 'image-provider' && <ImageProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
           {selectedProvider === 'web-search-provider' && <WebSearchProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
           {selectedProvider === 'privacy' && <PrivacySettings />}
+          {selectedProvider === "api-keys" && (
+            <ApiKeyManagement enabled={Boolean(authSummary.is_admin)} />
+          )}
+          {selectedProvider === "teams" && (
+            <TeamManagement enabled={Boolean(authSummary.is_admin)} />
+          )}
           {selectedProvider === "session" && (
             <div className="w-full max-w-lg space-y-5 rounded-[20px] border border-[#EDEEEF] bg-white p-7">
               <div>
@@ -387,7 +421,7 @@ const SettingsPage = () => {
       </main>
 
       {/* Fixed Bottom Button — hidden on Sign out; nothing to save there */}
-      {selectedProvider !== "session" ? (
+      {selectedProvider !== "session" && selectedProvider !== "teams" && selectedProvider !== "api-keys" ? (
         <div className=" mx-auto fixed bottom-20 right-5 ">
           <button
             onClick={handleSaveConfig}

@@ -1,12 +1,19 @@
 from typing import List
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query, Header
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import or_, select
 
 from models.image_prompt import ImagePrompt
 from models.sql.image_asset import ImageAsset
 from services.database import get_async_session
 from services.image_generation_service import ImageGenerationService
+from utils.access_control import (
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_TEAM,
+    apply_actor_ownership,
+    require_resource_access,
+)
 from utils.asset_directory_utils import (
     filesystem_image_path_to_app_data_url,
     get_images_directory,
@@ -18,6 +25,7 @@ from enums.image_provider import ImageProvider
 import os
 import uuid
 from utils.file_utils import get_file_name_with_random_uuid
+from utils.request_auth import get_request_actor
 
 IMAGES_ROUTER = APIRouter(prefix="/images", tags=["Images"])
 
@@ -93,8 +101,11 @@ async def search_stock_images(
 
 @IMAGES_ROUTER.get("/generate")
 async def generate_image(
-    prompt: str, sql_session: AsyncSession = Depends(get_async_session)
+    request: Request,
+    prompt: str,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
+    actor = get_request_actor(request)
     images_directory = get_images_directory()
     image_prompt = ImagePrompt(prompt=prompt)
     image_generation_service = ImageGenerationService(images_directory)
@@ -103,6 +114,7 @@ async def generate_image(
     if not isinstance(image, ImageAsset):
         return normalize_slide_asset_url(image) if isinstance(image, str) else image
 
+    apply_actor_ownership(image, actor, VISIBILITY_PRIVATE)
     sql_session.add(image)
     await sql_session.commit()
 
@@ -121,11 +133,24 @@ def _image_asset_api_dict(asset: ImageAsset) -> dict:
 
 
 @IMAGES_ROUTER.get("/generated")
-async def get_generated_images(sql_session: AsyncSession = Depends(get_async_session)):
+async def get_generated_images(
+    request: Request, sql_session: AsyncSession = Depends(get_async_session)
+):
     try:
+        actor = get_request_actor(request)
         images_result = await sql_session.scalars(
             select(ImageAsset)
-            .where(ImageAsset.is_uploaded == False)
+            .where(
+                ImageAsset.is_uploaded == False,
+                or_(
+                    ImageAsset.owner_user_id == actor.owner_user_id,
+                    ImageAsset.visibility == VISIBILITY_PUBLIC,
+                    (
+                        (ImageAsset.visibility == VISIBILITY_TEAM)
+                        & (ImageAsset.team_id == actor.team_id)
+                    ),
+                ),
+            )
             .order_by(ImageAsset.created_at.desc())
         )
         return [_image_asset_api_dict(a) for a in images_result]
@@ -137,9 +162,12 @@ async def get_generated_images(sql_session: AsyncSession = Depends(get_async_ses
 
 @IMAGES_ROUTER.post("/upload")
 async def upload_image(
-    file: UploadFile = File(...), sql_session: AsyncSession = Depends(get_async_session)
+    request: Request,
+    file: UploadFile = File(...),
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
     try:
+        actor = get_request_actor(request)
         new_filename = get_file_name_with_random_uuid(file)
         image_path = os.path.join(
             get_images_directory(), os.path.basename(new_filename)
@@ -149,6 +177,7 @@ async def upload_image(
             f.write(await file.read())
 
         image_asset = ImageAsset(path=image_path, is_uploaded=True)
+        apply_actor_ownership(image_asset, actor, VISIBILITY_PRIVATE)
 
         sql_session.add(image_asset)
         await sql_session.commit()
@@ -161,11 +190,24 @@ async def upload_image(
 
 
 @IMAGES_ROUTER.get("/uploaded")
-async def get_uploaded_images(sql_session: AsyncSession = Depends(get_async_session)):
+async def get_uploaded_images(
+    request: Request, sql_session: AsyncSession = Depends(get_async_session)
+):
     try:
+        actor = get_request_actor(request)
         images_result = await sql_session.scalars(
             select(ImageAsset)
-            .where(ImageAsset.is_uploaded == True)
+            .where(
+                ImageAsset.is_uploaded == True,
+                or_(
+                    ImageAsset.owner_user_id == actor.owner_user_id,
+                    ImageAsset.visibility == VISIBILITY_PUBLIC,
+                    (
+                        (ImageAsset.visibility == VISIBILITY_TEAM)
+                        & (ImageAsset.team_id == actor.team_id)
+                    ),
+                ),
+            )
             .order_by(ImageAsset.created_at.desc())
         )
         return [_image_asset_api_dict(a) for a in images_result]
@@ -177,18 +219,28 @@ async def get_uploaded_images(sql_session: AsyncSession = Depends(get_async_sess
 
 @IMAGES_ROUTER.delete("/{id}", status_code=204)
 async def delete_uploaded_image_by_id(
-    id: uuid.UUID, sql_session: AsyncSession = Depends(get_async_session)
+    id: uuid.UUID,
+    request: Request,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
     try:
+        actor = get_request_actor(request)
         # Fetch the asset to get its actual file path
         image = await sql_session.get(ImageAsset, id)
         if not image:
             raise HTTPException(status_code=404, detail="Image not found")
+        require_resource_access(
+            actor,
+            owner_user_id=image.owner_user_id,
+            team_id=image.team_id,
+            visibility=image.visibility,
+        )
 
         os.remove(image.path)
 
         await sql_session.delete(image)
         await sql_session.commit()
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete image: {str(e)}")

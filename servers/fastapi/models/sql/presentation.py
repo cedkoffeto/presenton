@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 import uuid
-from sqlalchemy import JSON, Column, DateTime, String
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, String
 from sqlmodel import Boolean, Field, SQLModel
 
 from models.presentation_outline_model import PresentationOutlineModel
@@ -42,6 +42,26 @@ class PresentationModel(SQLModel, table=True):
     include_title_slide: bool = Field(sa_column=Column(Boolean), default=True)
     web_search: bool = Field(sa_column=Column(Boolean), default=False)
     theme: Optional[dict] = Field(sa_column=Column(JSON), default=None)
+    owner_user_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("users.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
+    )
+    team_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("teams.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
+    )
+    visibility: str = Field(sa_column=Column(String), default="private")
+    share_token: Optional[str] = Field(
+        default=None, sa_column=Column(String, unique=True, index=True, nullable=True)
+    )
 
     def get_new_presentation(self):
         return PresentationModel(
@@ -59,6 +79,9 @@ class PresentationModel(SQLModel, table=True):
             verbosity=self.verbosity,
             include_table_of_contents=self.include_table_of_contents,
             include_title_slide=self.include_title_slide,
+            owner_user_id=self.owner_user_id,
+            team_id=self.team_id,
+            visibility=self.visibility,
         )
 
     def get_presentation_outline(self):

@@ -1,19 +1,26 @@
-import copy
 import uuid
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import or_, select
 
 from models.sql.image_asset import ImageAsset
-from models.sql.key_value import KeyValueSqlModel
+from models.sql.theme import ThemeModel
 from services.database import get_async_session
+from utils.access_control import (
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_TEAM,
+    apply_actor_ownership,
+    generate_share_token,
+    require_resource_access,
+)
 from utils.asset_directory_utils import normalize_slide_asset_url
+from utils.request_auth import get_request_actor
 
 THEMES_ROUTER = APIRouter(prefix="/themes", tags=["Themes"])
-THEMES_STORAGE_KEY = "presentation_custom_themes"
 
 
 class ThemeRequest(BaseModel):
@@ -23,6 +30,7 @@ class ThemeRequest(BaseModel):
     logo: Optional[str] = None
     logo_url: Optional[str] = None
     data: dict[str, Any] = Field(default_factory=dict)
+    visibility: str = VISIBILITY_PRIVATE
 
 
 class ThemeUpdateRequest(BaseModel):
@@ -32,6 +40,8 @@ class ThemeUpdateRequest(BaseModel):
     logo: Optional[str] = None
     logo_url: Optional[str] = None
     data: Optional[dict[str, Any]] = None
+    visibility: Optional[str] = None
+    public_share_enabled: Optional[bool] = None
 
 
 class ThemeResponse(BaseModel):
@@ -43,47 +53,35 @@ class ThemeResponse(BaseModel):
     logo_url: Optional[str] = None
     company_name: Optional[str] = None
     data: dict[str, Any]
+    visibility: str
+    team_id: Optional[str] = None
+    public_share_url: Optional[str] = None
 
 
-def _normalize_theme(theme: dict[str, Any]) -> ThemeResponse:
-    raw_logo_url = theme.get("logo_url")
-    if raw_logo_url is None:
-        logo_url = None
-    elif isinstance(raw_logo_url, str):
-        s = raw_logo_url.strip()
-        logo_url = normalize_slide_asset_url(s) if s else None
-    else:
-        logo_url = raw_logo_url
+def _public_share_url(request: Request, theme: ThemeModel) -> Optional[str]:
+    if not theme.share_token or theme.visibility != VISIBILITY_PUBLIC:
+        return None
+    return str(request.url_for("get_theme_by_share_token", share_token=theme.share_token))
+
+
+def _normalize_theme(theme: ThemeModel, request: Request, username: str) -> ThemeResponse:
     return ThemeResponse(
-        id=str(theme["id"]),
-        name=theme["name"],
-        description=theme["description"],
-        user=theme.get("user", "local"),
-        logo=theme.get("logo"),
-        logo_url=logo_url,
-        company_name=theme.get("company_name"),
-        data=theme.get("data", {}),
+        id=str(theme.id),
+        name=theme.name,
+        description=theme.description,
+        user=username,
+        logo=theme.logo,
+        logo_url=normalize_slide_asset_url(theme.logo_url) if theme.logo_url else None,
+        company_name=theme.company_name,
+        data=theme.data or {},
+        visibility=theme.visibility,
+        team_id=str(theme.team_id) if theme.team_id else None,
+        public_share_url=_public_share_url(request, theme),
     )
-
-
-async def _get_themes_row(sql_session: AsyncSession) -> Optional[KeyValueSqlModel]:
-    return await sql_session.scalar(
-        select(KeyValueSqlModel).where(KeyValueSqlModel.key == THEMES_STORAGE_KEY)
-    )
-
-
-def _read_themes_from_row(row: Optional[KeyValueSqlModel]) -> list[dict[str, Any]]:
-    if not row:
-        return []
-    value = row.value if isinstance(row.value, dict) else {}
-    themes = value.get("themes", [])
-    if not isinstance(themes, list):
-        return []
-    return copy.deepcopy(themes)
 
 
 async def _resolve_logo_url(
-    sql_session: AsyncSession, logo: Optional[str]
+    sql_session: AsyncSession, actor, logo: Optional[str]
 ) -> Optional[str]:
     if not logo:
         return None
@@ -95,96 +93,143 @@ async def _resolve_logo_url(
     image_asset = await sql_session.get(ImageAsset, logo_uuid)
     if not image_asset:
         raise HTTPException(status_code=404, detail="Logo not found")
+    require_resource_access(
+        actor,
+        owner_user_id=image_asset.owner_user_id,
+        team_id=image_asset.team_id,
+        visibility=image_asset.visibility,
+    )
     return normalize_slide_asset_url(image_asset.path)
 
 
 @THEMES_ROUTER.get("/default", response_model=List[dict[str, Any]])
 async def get_default_themes():
-    # Built-in themes are provided by Next.js constants in this project.
     return []
 
 
 @THEMES_ROUTER.get("/all", response_model=List[ThemeResponse])
-async def get_themes(sql_session: AsyncSession = Depends(get_async_session)):
-    row = await _get_themes_row(sql_session)
-    themes = _read_themes_from_row(row)
-    return [_normalize_theme(theme) for theme in themes]
+async def get_themes(
+    request: Request, sql_session: AsyncSession = Depends(get_async_session)
+):
+    actor = get_request_actor(request)
+    result = await sql_session.scalars(
+        select(ThemeModel)
+        .where(
+            or_(
+                ThemeModel.owner_user_id == actor.owner_user_id,
+                ThemeModel.visibility == VISIBILITY_PUBLIC,
+                (
+                    (ThemeModel.visibility == VISIBILITY_TEAM)
+                    & (ThemeModel.team_id == actor.team_id)
+                ),
+            )
+        )
+        .order_by(ThemeModel.created_at.desc())
+    )
+    return [_normalize_theme(theme, request, actor.user.username) for theme in result]
+
+
+@THEMES_ROUTER.get("/share/{share_token}", response_model=ThemeResponse, name="get_theme_by_share_token")
+async def get_theme_by_share_token(
+    share_token: str,
+    request: Request,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    theme = await sql_session.scalar(
+        select(ThemeModel).where(
+            ThemeModel.share_token == share_token,
+            ThemeModel.visibility == VISIBILITY_PUBLIC,
+        )
+    )
+    if not theme:
+        raise HTTPException(status_code=404, detail="Theme not found")
+    return _normalize_theme(theme, request, "public")
 
 
 @THEMES_ROUTER.post("/create", response_model=ThemeResponse)
 async def create_theme(
-    payload: ThemeRequest, sql_session: AsyncSession = Depends(get_async_session)
+    request: Request,
+    payload: ThemeRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
-    row = await _get_themes_row(sql_session)
-    themes = _read_themes_from_row(row)
-    logo_url = payload.logo_url or await _resolve_logo_url(sql_session, payload.logo)
-
-    theme = {
-        "id": str(uuid.uuid4()),
-        "name": payload.name,
-        "description": payload.description,
-        "user": "local",
-        "logo": payload.logo,
-        "logo_url": logo_url,
-        "company_name": payload.company_name,
-        "data": payload.data,
-    }
-    themes.append(theme)
-
-    if row:
-        row.value = {"themes": themes}
-        sql_session.add(row)
-    else:
-        sql_session.add(KeyValueSqlModel(key=THEMES_STORAGE_KEY, value={"themes": themes}))
-
+    actor = get_request_actor(request)
+    logo_url = payload.logo_url or await _resolve_logo_url(sql_session, actor, payload.logo)
+    theme = ThemeModel(
+        name=payload.name,
+        description=payload.description,
+        company_name=payload.company_name,
+        logo=payload.logo,
+        logo_url=logo_url,
+        data=payload.data,
+        share_token=generate_share_token() if payload.visibility == VISIBILITY_PUBLIC else None,
+    )
+    apply_actor_ownership(theme, actor, payload.visibility)
+    sql_session.add(theme)
     await sql_session.commit()
-    return _normalize_theme(theme)
+    await sql_session.refresh(theme)
+    return _normalize_theme(theme, request, actor.user.username)
 
 
 @THEMES_ROUTER.patch("/update/{theme_id}", response_model=ThemeResponse)
 async def update_theme(
     theme_id: str,
+    request: Request,
     payload: ThemeUpdateRequest,
     sql_session: AsyncSession = Depends(get_async_session),
 ):
-    row = await _get_themes_row(sql_session)
-    if not row:
-        raise HTTPException(status_code=404, detail="Theme not found")
-
-    themes = _read_themes_from_row(row)
-    theme = next((item for item in themes if item.get("id") == theme_id), None)
+    actor = get_request_actor(request)
+    theme = await sql_session.get(ThemeModel, uuid.UUID(theme_id))
     if not theme:
         raise HTTPException(status_code=404, detail="Theme not found")
-
+    require_resource_access(
+        actor,
+        owner_user_id=theme.owner_user_id,
+        team_id=theme.team_id,
+        visibility=theme.visibility,
+    )
     if payload.name is not None:
-        theme["name"] = payload.name
+        theme.name = payload.name
     if payload.description is not None:
-        theme["description"] = payload.description
+        theme.description = payload.description
     if payload.company_name is not None:
-        theme["company_name"] = payload.company_name
+        theme.company_name = payload.company_name
     if payload.data is not None:
-        theme["data"] = payload.data
+        theme.data = payload.data
     if payload.logo is not None:
-        theme["logo"] = payload.logo
-        theme["logo_url"] = await _resolve_logo_url(sql_session, payload.logo)
+        theme.logo = payload.logo
+        theme.logo_url = await _resolve_logo_url(sql_session, actor, payload.logo)
     elif payload.logo_url is not None:
-        theme["logo_url"] = payload.logo_url
-
-    row.value = {"themes": themes}
-    sql_session.add(row)
+        theme.logo_url = payload.logo_url
+    if payload.visibility is not None:
+        theme.visibility = payload.visibility
+    if payload.public_share_enabled is True and not theme.share_token:
+        theme.share_token = generate_share_token()
+        theme.visibility = VISIBILITY_PUBLIC
+    elif payload.public_share_enabled is False:
+        theme.share_token = None
+        if theme.visibility == VISIBILITY_PUBLIC:
+            theme.visibility = VISIBILITY_PRIVATE
+    sql_session.add(theme)
     await sql_session.commit()
-    return _normalize_theme(theme)
+    await sql_session.refresh(theme)
+    return _normalize_theme(theme, request, actor.user.username)
 
 
 @THEMES_ROUTER.delete("/delete/{theme_id}", status_code=204)
 async def delete_theme(
-    theme_id: str, sql_session: AsyncSession = Depends(get_async_session)
+    theme_id: str,
+    request: Request,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
-    row = await _get_themes_row(sql_session)
-    if not row:
+    actor = get_request_actor(request)
+    theme = await sql_session.get(ThemeModel, uuid.UUID(theme_id))
+    if not theme:
         return
-
-    themes = _read_themes_from_row(row)
-    row.value = {"themes": [theme for theme in themes if theme.get("id") != theme_id]}
-    sql_session.add(row)
+    require_resource_access(
+        actor,
+        owner_user_id=theme.owner_user_id,
+        team_id=theme.team_id,
+        visibility=theme.visibility,
+    )
+    await sql_session.delete(theme)
     await sql_session.commit()
