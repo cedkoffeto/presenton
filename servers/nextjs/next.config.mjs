@@ -1,8 +1,14 @@
+import path from "path";
+import { fileURLToPath } from "url";
+
 const presentonHttpHostPort =
   process.env.PRESENTON_HTTP_HOST_PORT ||
   process.env.PRESENTON_HOST_HTTP_PORT ||
   process.env.PRESENTON_PUBLIC_PORT ||
   "5001";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const nextConfig = {
   reactStrictMode: false,
@@ -69,7 +75,21 @@ const nextConfig = {
       },
     ],
   },
-  
+
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      "lucide-react$": path.join(
+        __dirname,
+        "node_modules",
+        "lucide-react",
+        "dist",
+        "esm",
+        "lucide-react.js"
+      ),
+    };
+    return config;
+  },
 };
 
 export default nextConfig;

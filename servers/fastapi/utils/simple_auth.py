@@ -9,7 +9,11 @@ from typing import Optional
 from fastapi import Request
 from starlette.responses import Response
 
-from utils.get_env import get_user_config_path_env, is_disable_auth_enabled
+from utils.get_env import (
+    get_user_config_path_env,
+    is_disable_auth_enabled,
+    is_oidc_enabled,
+)
 from utils.user_config_store import read_user_config_file, update_user_config_file
 
 SESSION_COOKIE_NAME = "presenton_session"
@@ -208,10 +212,6 @@ def validate_session_token(token: Optional[str]) -> Optional[str]:
         return None
 
     config = _load_user_config()
-    stored_username = config.get("AUTH_USERNAME")
-    if not stored_username:
-        return None
-
     secret = config.get("AUTH_SECRET_KEY")
     if not secret:
         return None
@@ -238,9 +238,6 @@ def validate_session_token(token: Optional[str]) -> Optional[str]:
         return None
 
     if version != 1:
-        return None
-
-    if not hmac.compare_digest(username, stored_username):
         return None
 
     if expires_at < int(time.time()):
@@ -286,9 +283,12 @@ def get_basic_auth_credentials_from_request(
 
 def get_auth_status(session_token: Optional[str] = None) -> dict:
     config = _load_user_config()
-    configured = bool(config.get("AUTH_USERNAME") and config.get("AUTH_PASSWORD_HASH"))
+    local_auth_configured = bool(
+        config.get("AUTH_USERNAME") and config.get("AUTH_PASSWORD_HASH")
+    )
+    configured = local_auth_configured or is_oidc_enabled()
 
-    if not configured:
+    if not configured and not config.get("AUTH_SECRET_KEY"):
         return {
             "configured": False,
             "authenticated": False,
@@ -297,7 +297,7 @@ def get_auth_status(session_token: Optional[str] = None) -> dict:
 
     username = validate_session_token(session_token)
     return {
-        "configured": True,
+        "configured": configured or bool(username),
         "authenticated": bool(username),
         "username": username,
     }

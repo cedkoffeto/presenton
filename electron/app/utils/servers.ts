@@ -175,15 +175,26 @@ export async function startNextJsServer(
   let stopping = false;
 
   if (isDev) {
-    // Windows: npm is npm.cmd; spawn() needs a shell or ENOENT.
+    const localNextCli = path.join(
+      directory,
+      "node_modules",
+      "next",
+      "dist",
+      "bin",
+      "next",
+    );
+    const nodeCommand =
+      process.env.NODE ||
+      process.env.npm_node_execpath ||
+      (process.platform === "win32" ? "node.exe" : "node");
     nextjsProcess = spawn(
-      process.platform === "win32" ? "npm.cmd" : "npm",
-      ["run", "dev", "--", "-p", port.toString()],
+      nodeCommand,
+      [localNextCli, "dev", "--webpack", "-p", port.toString()],
       {
         cwd: directory,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, ...env },
-        shell: process.platform === "win32",
+        windowsHide: process.platform === "win32",
       }
     );
     const nextjsLogPath = path.join(getLogsDir(), "nextjs-server.log");

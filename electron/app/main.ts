@@ -144,6 +144,38 @@ function resolveExportConverterPath(appRoot: string): string | undefined {
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
+function hasExportRuntimeBundle(root: string): boolean {
+  return (
+    fs.existsSync(path.join(root, "index.cjs")) ||
+    fs.existsSync(path.join(root, "index.js"))
+  );
+}
+
+function resolveExportPackageRoot(): string {
+  const candidates = [
+    path.join(resourceBaseDir, "resources", "export"),
+    path.resolve(resourceBaseDir, "..", "presentation-export"),
+    path.resolve(process.cwd(), "..", "presentation-export"),
+    path.resolve(process.cwd(), "presentation-export"),
+  ];
+
+  const resolved = candidates.find(hasExportRuntimeBundle);
+  return resolved || candidates[0];
+}
+
+function resolveExportConverterPathForRoot(exportRoot: string): string | undefined {
+  const pyDir = path.join(exportRoot, "py");
+  const candidates = [
+    path.join(pyDir, `convert-${process.platform}-${process.arch}`),
+    path.join(pyDir, `convert-${process.platform}-${process.arch}.exe`),
+    path.join(pyDir, `convert-${process.platform}`),
+    path.join(pyDir, `convert-${process.platform}.exe`),
+    path.join(pyDir, "convert"),
+    path.join(pyDir, "convert.exe"),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
 function isDisableAuthEnabledValue(value?: string): boolean {
   const raw = value?.trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
@@ -154,7 +186,7 @@ function resolveElectronDisableAuth(): string {
     process.env.ELECTRON_DISABLE_AUTH ?? process.env.DISABLE_AUTH
   )?.trim().toLowerCase();
   if (!raw) {
-    return "true";
+    return "false";
   }
   if (["0", "false", "no", "off"].includes(raw)) {
     return "false";
@@ -162,7 +194,7 @@ function resolveElectronDisableAuth(): string {
   if (isDisableAuthEnabledValue(raw)) {
     return "true";
   }
-  return "true";
+  return "false";
 }
 
 function buildImageMagickEnv(runtime: ImageMagickRuntime | null): Partial<FastApiEnv> {
@@ -315,8 +347,10 @@ async function startServers(fastApiPort: number, nextjsPort: number) {
     const userConfigPath = getUserConfigPath();
     const disableAuthForElectron = resolveElectronDisableAuth();
     const imageMagickRuntime = resolveImageMagickRuntime();
-    const exportPackageRoot = path.join(resourceBaseDir, "resources", "export");
-    const exportConverterPath = resolveExportConverterPath(resourceBaseDir);
+    const exportPackageRoot = resolveExportPackageRoot();
+    const exportConverterPath =
+      resolveExportConverterPathForRoot(exportPackageRoot) ??
+      resolveExportConverterPath(resourceBaseDir);
     const exportChromiumPath = await resolveLaunchableExportChromiumPath();
     const puppeteerCacheDir = path.join(getCacheDir(), "puppeteer");
     const puppeteerTempDir = path.join(tempDir, "puppeteer");

@@ -79,10 +79,14 @@ if os.path.isdir(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Middlewares
-origins = ["*"]
+local_dev_origins = [
+    "http://127.0.0.1:40000",
+    "http://localhost:40000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=local_dev_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,6 +94,16 @@ app.add_middleware(
 
 app.add_middleware(UserConfigEnvUpdateMiddleware)
 app.add_middleware(SessionAuthMiddleware)
+
+
+@app.get("/")
+async def root_health():
+    return {"status": "ok"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.middleware("http")

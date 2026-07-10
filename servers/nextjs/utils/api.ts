@@ -105,8 +105,12 @@ function isElectronRuntime(): boolean {
   return typeof window !== "undefined" && !!window.electron;
 }
 
+function hasDirectFastApiOriginInBrowser(): boolean {
+  return typeof window !== "undefined" && !!getConfiguredFastApiUrl();
+}
+
 function shouldUseDirectFastApiOriginInBrowser(): boolean {
-  return isElectronRuntime() || !!getFastApiUrlFromQuery();
+  return isElectronRuntime() || hasDirectFastApiOriginInBrowser() || !!getFastApiUrlFromQuery();
 }
 
 function resolveBackendPathForRuntime(path: string): string {

@@ -456,11 +456,20 @@ async def prepare_presentation(
 
 @PRESENTATION_ROUTER.get("/stream/{id}", response_model=PresentationWithSlides)
 async def stream_presentation(
-    id: uuid.UUID, sql_session: AsyncSession = Depends(get_async_session)
+    id: uuid.UUID,
+    request: Request,
+    sql_session: AsyncSession = Depends(get_async_session),
 ):
     presentation = await sql_session.get(PresentationModel, id)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    actor = get_request_actor(request)
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
     if not presentation.structure:
         raise HTTPException(
             status_code=400,

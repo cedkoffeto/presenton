@@ -371,14 +371,14 @@ const SettingsPage = () => {
 
   return (
     <div className="h-screen font-syne flex flex-col overflow-hidden relative">
-      <main className="w-full mx-auto gap-6   overflow-hidden flex ">
+      <main className="w-full mx-auto gap-6 overflow-hidden flex flex-1 min-h-0">
         <SettingSideBar
           selectedProvider={selectedProvider}
           setSelectedProvider={selectSettingsSection}
           showAdminSections={Boolean(authSummary.is_admin)}
         />
-        <div className="w-full">
-          <div className="sticky top-0 right-0 z-50 py-[28px]   backdrop-blur mb-4 ">
+        <div className="w-full min-h-0 flex flex-col overflow-hidden">
+          <div className="sticky top-0 right-0 z-50 py-[28px] backdrop-blur mb-4 shrink-0">
             <div className="flex  gap-3 items-center ">
               <h3 className=" text-[28px] tracking-[-0.84px] font-unbounded font-normal text-black flex items-center gap-2">
                 Settings
@@ -388,35 +388,35 @@ const SettingsPage = () => {
               </p>
             </div>
           </div>
-
-          {selectedProvider === 'text-provider' && <TextProvider
-            onInputChange={handleTextProviderInputChange}
-            llmConfig={llmConfig}
-          />}
-          {selectedProvider === 'image-provider' && <ImageProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
-          {selectedProvider === 'web-search-provider' && <WebSearchProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
-          {selectedProvider === 'privacy' && <PrivacySettings />}
-          {selectedProvider === "api-keys" && (
-            <ApiKeyManagement enabled={Boolean(authSummary.is_admin)} />
-          )}
-          {selectedProvider === "teams" && (
-            <TeamManagement enabled={Boolean(authSummary.is_admin)} />
-          )}
-          {selectedProvider === "session" && (
-            <div className="w-full max-w-lg space-y-5 rounded-[20px] border border-[#EDEEEF] bg-white p-7">
-              <div>
-                <h4 className="font-unbounded text-lg font-normal text-black">Sign out</h4>
-                <p className="mt-2 font-syne text-sm leading-relaxed text-[#494A4D]">
-                  End your session on this deployment. You will need to sign in again to use the app and access the API.
-                </p>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-4 pb-28">
+            {selectedProvider === 'text-provider' && <TextProvider
+              onInputChange={handleTextProviderInputChange}
+              llmConfig={llmConfig}
+            />}
+            {selectedProvider === 'image-provider' && <ImageProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
+            {selectedProvider === 'web-search-provider' && <WebSearchProvider llmConfig={llmConfig} setLlmConfig={setLlmConfig} />}
+            {selectedProvider === 'privacy' && <PrivacySettings />}
+            {selectedProvider === "api-keys" && (
+              <ApiKeyManagement enabled={Boolean(authSummary.is_admin)} />
+            )}
+            {selectedProvider === "teams" && (
+              <TeamManagement enabled={Boolean(authSummary.is_admin)} />
+            )}
+            {selectedProvider === "session" && (
+              <div className="w-full max-w-lg space-y-5 rounded-[20px] border border-[#EDEEEF] bg-white p-7">
+                <div>
+                  <h4 className="font-unbounded text-lg font-normal text-black">Sign out</h4>
+                  <p className="mt-2 font-syne text-sm leading-relaxed text-[#494A4D]">
+                    End your session on this deployment. You will need to sign in again to use the app and access the API.
+                  </p>
+                </div>
+                <LogoutButton
+                  label="Sign out"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-[58px] border border-[#EDEEEF] bg-[#7C51F8] px-5 py-3 font-syne text-xs font-semibold text-white transition hover:bg-[#6d46e6] disabled:cursor-not-allowed disabled:opacity-60"
+                />
               </div>
-              <LogoutButton
-                label="Sign out"
-                className="inline-flex w-full items-center justify-center gap-2 rounded-[58px] border border-[#EDEEEF] bg-[#7C51F8] px-5 py-3 font-syne text-xs font-semibold text-white transition hover:bg-[#6d46e6] disabled:cursor-not-allowed disabled:opacity-60"
-              />
-            </div>
-          )}
-
+            )}
+          </div>
         </div>
       </main>
 

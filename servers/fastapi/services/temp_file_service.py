@@ -1,4 +1,5 @@
 import os
+import errno
 from typing import Optional, Union
 
 from fastapi import HTTPException
@@ -155,9 +156,25 @@ class TempFileService:
         dir_path = self.resolve_temp_path(dir_path, must_exist=True)
         for root, dirs, files in os.walk(dir_path, topdown=False):
             for name in files:
-                os.remove(os.path.join(root, name))
+                file_path = os.path.join(root, name)
+                try:
+                    os.remove(file_path)
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    continue
             for name in dirs:
-                os.rmdir(os.path.join(root, name))
+                nested_dir_path = os.path.join(root, name)
+                try:
+                    os.rmdir(nested_dir_path)
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    continue
+                except OSError as exc:
+                    if exc.errno in {errno.ENOTEMPTY, errno.EBUSY, errno.EPERM}:
+                        continue
+                    raise
 
     def cleanup_temp_dir(self, dir_path: str):
         try:
@@ -167,7 +184,18 @@ class TempFileService:
                 return
             raise
         self._delete_dir_files(dir_path)
-        os.rmdir(dir_path)
+        if os.path.realpath(dir_path) == self._base_dir_realpath():
+            return
+        try:
+            os.rmdir(dir_path)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            return
+        except OSError as exc:
+            if exc.errno in {errno.ENOTEMPTY, errno.EBUSY, errno.EPERM}:
+                return
+            raise
 
     def cleanup_base_dir(self):
         self.cleanup_temp_dir(self.base_dir)

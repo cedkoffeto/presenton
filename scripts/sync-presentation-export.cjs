@@ -137,7 +137,14 @@ async function resolveLatestTag() {
 
 function chmodIfPossible(filePath) {
   if (process.platform !== "win32") {
-    fs.chmodSync(filePath, 0o755);
+    try {
+      fs.chmodSync(filePath, 0o755);
+    } catch (error) {
+      if (["EPERM", "EACCES", "EROFS"].includes(error?.code)) {
+        return;
+      }
+      throw error;
+    }
   }
 }
 
@@ -216,10 +223,17 @@ function ensureCommonJsEntrypoint() {
     return { ok: false, reason: `Missing runtime bundle: ${targetIndexJs}` };
   }
 
+  if (fs.existsSync(targetIndexCjs)) {
+    return { ok: true, entrypointPath: targetIndexCjs };
+  }
+
   try {
     fs.copyFileSync(targetIndexJs, targetIndexCjs);
     return { ok: true, entrypointPath: targetIndexCjs };
   } catch (err) {
+    if (["EPERM", "EACCES", "EROFS"].includes(err?.code)) {
+      return { ok: true, entrypointPath: targetIndexJs };
+    }
     return {
       ok: false,
       reason: `Failed to create CommonJS entrypoint ${targetIndexCjs}: ${err.message}`,

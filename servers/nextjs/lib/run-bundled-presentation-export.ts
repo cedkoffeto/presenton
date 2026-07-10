@@ -186,8 +186,10 @@ async function runBundledPresentationExportLocked(params: {
 
   await fs.access(converter);
 
-  const nextjsUrl =
-    process.env.NEXT_PUBLIC_URL?.trim() || "http://127.0.0.1";
+  // Export runs from the server process, so it must target the internal
+  // Next.js listener rather than the browser-facing app URL used for SSO
+  // redirects in Docker/OpenShift deployments.
+  const nextjsUrl = "http://127.0.0.1:3000";
   const q = new URLSearchParams({ id: presentationId });
   const sessionToken = extractSessionTokenFromCookieHeader(cookieHeader);
   if (sessionToken) {

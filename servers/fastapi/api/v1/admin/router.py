@@ -136,7 +136,7 @@ async def list_users(request: Request, query: str = Query(default="", max_length
                 .order_by(UserModel.created_at.desc())
                 .limit(50)
             )
-        users = (await sql_session.exec(statement)).all()
+        users = (await sql_session.execute(statement)).scalars().all()
         return [_serialize_user(user) for user in users]
 
 
@@ -145,12 +145,12 @@ async def list_teams(request: Request):
     await _require_admin(request)
     async with async_session_maker() as sql_session:
         teams = (
-            await sql_session.exec(
+            await sql_session.execute(
                 select(TeamModel).order_by(func.lower(TeamModel.name).asc())
             )
-        ).all()
+        ).scalars().all()
         memberships = (
-            await sql_session.exec(
+            await sql_session.execute(
                 select(TeamMembershipModel, UserModel)
                 .join(UserModel, UserModel.id == TeamMembershipModel.user_id)
                 .order_by(TeamMembershipModel.created_at.asc())
@@ -323,18 +323,18 @@ async def list_integrations(request: Request):
     await _require_admin(request)
     async with async_session_maker() as sql_session:
         clients = (
-            await sql_session.exec(
+            await sql_session.execute(
                 select(IntegrationClientModel).order_by(IntegrationClientModel.created_at.desc())
             )
-        ).all()
+        ).scalars().all()
         team_ids = [client.default_team_id for client in clients if client.default_team_id]
         teams_by_id: dict[uuid.UUID, TeamModel] = {}
         if team_ids:
             teams = (
-                await sql_session.exec(
+                await sql_session.execute(
                     select(TeamModel).where(TeamModel.id.in_(team_ids))
                 )
-            ).all()
+            ).scalars().all()
             teams_by_id = {team.id: team for team in teams}
         return [
             _serialize_integration_client(client, teams_by_id.get(client.default_team_id))

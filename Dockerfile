@@ -23,8 +23,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python \
     "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
-ENV HF_HOME=/root/.cache/huggingface \
-    PRESENTON_FASTEMBED_ICON_CACHE_DIR=/root/.cache/presenton/fastembed-icons
+ENV HF_HOME=/tmp/presenton-build-cache/huggingface \
+    PRESENTON_FASTEMBED_ICON_CACHE_DIR=/tmp/presenton-build-cache/presenton/fastembed-icons
 # Warm FastEmbed caches into the image (not a BuildKit cache mount, or HF weights would be missing).
 RUN /opt/venv/bin/python scripts/warm_fastembed_cache.py
 
@@ -85,8 +85,9 @@ ENV APP_DATA_DIRECTORY=/app_data \
     EXPORT_RUNTIME_DIR=/app/presentation-export \
     BUILT_PYTHON_MODULE_PATH=/app/presentation-export/py/convert-linux-current \
     PRESENTON_APP_ROOT=/app \
-    HF_HOME=/root/.cache/huggingface \
-    PRESENTON_FASTEMBED_ICON_CACHE_DIR=/root/.cache/presenton/fastembed-icons \
+    HOME=/tmp \
+    HF_HOME=/app/.cache/huggingface \
+    PRESENTON_FASTEMBED_ICON_CACHE_DIR=/app/.cache/presenton/fastembed-icons \
     PATH="/opt/venv/bin:${PATH}" \
     NODE_ENV=production \
     START_OLLAMA=false \
@@ -113,13 +114,22 @@ RUN find /usr/share/fonts -type f ! -iname 'Noto*' -delete \
     && fc-cache -fsv
 
 RUN mkdir -p /app/scripts /app/servers/fastapi /app/servers/nextjs
-RUN mkdir -p /app_data/exports /app_data/images /app_data/uploads /app_data/fonts /app_data/pptx-to-html \
-    && chmod -R a+rX /app_data
+RUN mkdir -p \
+      /app/.cache/huggingface \
+      /app/.cache/presenton/fastembed-icons \
+      /app_data/exports \
+      /app_data/images \
+      /app_data/uploads \
+      /app_data/fonts \
+      /app_data/pptx-to-html \
+      /tmp/presenton \
+    && chgrp -R 0 /app /app_data /tmp/presenton \
+    && chmod -R g=u /app /app_data /tmp/presenton
 
 COPY --from=fastapi-builder /opt/venv /opt/venv
 COPY --from=fastapi-builder /app/servers/fastapi /app/servers/fastapi
-COPY --from=fastapi-builder /root/.cache/huggingface /root/.cache/huggingface
-COPY --from=fastapi-builder /root/.cache/presenton/fastembed-icons /root/.cache/presenton/fastembed-icons
+COPY --from=fastapi-builder /tmp/presenton-build-cache/huggingface /app/.cache/huggingface
+COPY --from=fastapi-builder /tmp/presenton-build-cache/presenton/fastembed-icons /app/.cache/presenton/fastembed-icons
 
 COPY --from=assets-builder /app/package.json /app/package.json
 COPY --from=assets-builder /app/document-extraction-liteparse /app/document-extraction-liteparse
@@ -146,6 +156,11 @@ COPY start.js LICENSE NOTICE ./
 COPY scripts/presenton-terminal-banner.mjs /app/scripts/presenton-terminal-banner.mjs
 COPY scripts/user-config-env.mjs /app/scripts/user-config-env.mjs
 COPY nginx.conf /etc/nginx/nginx.conf
+
+RUN chgrp -R 0 /app /opt/venv /etc/nginx /var/lib/nginx /var/log/nginx /tmp \
+    && chmod -R g=u /app /opt/venv /etc/nginx /var/lib/nginx /var/log/nginx /tmp
+
+USER 1001:0
 
 EXPOSE 8080
 CMD ["node", "/app/start.js"]

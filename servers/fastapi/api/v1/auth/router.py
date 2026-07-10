@@ -1,4 +1,5 @@
 import secrets
+import os
 from urllib.parse import urlencode
 
 import aiohttp
@@ -52,11 +53,24 @@ async def _oidc_discovery_document() -> dict:
     if not issuer:
         raise HTTPException(status_code=400, detail="OIDC is not configured")
     discovery_url = f"{issuer}/.well-known/openid-configuration"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(discovery_url) as response:
-            if response.status >= 400:
-                raise HTTPException(status_code=502, detail="Failed to fetch OIDC discovery document")
-            return await response.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(discovery_url) as response:
+                if response.status >= 400:
+                    body = (await response.text()).strip()
+                    detail = (
+                        f"Failed to fetch OIDC discovery document from {discovery_url} "
+                        f"(status {response.status})"
+                    )
+                    if body:
+                        detail = f"{detail}: {body[:200]}"
+                    raise HTTPException(status_code=502, detail=detail)
+                return await response.json()
+    except aiohttp.ClientError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch OIDC discovery document from {discovery_url}: {exc}",
+        ) from exc
 
 
 @API_V1_AUTH_ROUTER.get("/status")
@@ -291,7 +305,8 @@ async def oidc_callback(request: Request):
         )
 
     token = create_session_token(username)
-    response = RedirectResponse(url="/")
+    redirect_target = (os.getenv("NEXT_PUBLIC_URL") or "").strip() or "/"
+    response = RedirectResponse(url=redirect_target)
     set_session_cookie(response, token, request)
     response.delete_cookie(
         "presenton_oidc_state",

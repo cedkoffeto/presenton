@@ -14,6 +14,18 @@ LEGACY_BASELINE_REVISION = "00b3c27a13bc"
 # Revision before 95b5127e93cd (template_create_infos); used when DB has theme but not that table.
 REVISION_BEFORE_TEMPLATE_CREATE_INFO = "82abdbc476a7"
 REVISION_TEMPLATE_CREATE_INFO = "95b5127e93cd"
+REVISION_CHAT_HISTORY = "c7b70d0f31b1"
+REVISION_PROVIDER_READY_IDENTITY = "18cddf7195d2"
+REVISION_INTEGRATION_API_KEYS = "6f60f08dbf55"
+REVISION_ORDER = [
+    LEGACY_BASELINE_REVISION,
+    "f42ad4074449",
+    REVISION_BEFORE_TEMPLATE_CREATE_INFO,
+    REVISION_TEMPLATE_CREATE_INFO,
+    REVISION_CHAT_HISTORY,
+    REVISION_PROVIDER_READY_IDENTITY,
+    REVISION_INTEGRATION_API_KEYS,
+]
 
 
 async def migrate_database_on_startup() -> None:
@@ -77,23 +89,52 @@ def _repair_orphan_alembic_revision(config: Config, database_url: str) -> None:
             version_num = connection.execute(
                 text("SELECT version_num FROM alembic_version LIMIT 1")
             ).scalar_one_or_none()
-            if not version_num or version_num in known:
+            target = _infer_revision_from_schema(inspector, tables, head)
+            if not version_num:
+                return
+            if version_num in known:
+                current_rank = _revision_rank(version_num)
+                target_rank = _revision_rank(target)
+                if current_rank <= target_rank:
+                    return
+                print(
+                    f"Alembic revision {version_num!r} is ahead of the live schema; "
+                    f"re-stamping back to inferred revision {target!r} before upgrade.",
+                    flush=True,
+                )
+                command.stamp(config, target)
                 return
             print(
                 f"Alembic revision {version_num!r} is missing from the codebase; "
                 "inferring applied migrations from schema and re-stamping.",
                 flush=True,
             )
-            target = _infer_revision_from_schema(inspector, tables, head)
             command.stamp(config, target)
     finally:
         engine.dispose()
 
 
+def _revision_rank(revision: str) -> int:
+    try:
+        return REVISION_ORDER.index(revision)
+    except ValueError:
+        return len(REVISION_ORDER)
+
+
 def _infer_revision_from_schema(inspector, tables: set[str], head_revision: str) -> str:
     """Best-effort: map existing SQLite/Postgres schema to our linear migration chain."""
+    if "integration_clients" in tables:
+        integration_client_columns = {
+            c["name"] for c in inspector.get_columns("integration_clients")
+        }
+        if "key_prefix" in integration_client_columns and "last_used_at" in integration_client_columns:
+            return REVISION_INTEGRATION_API_KEYS
+
+    if "users" in tables or "teams" in tables or "team_memberships" in tables:
+        return REVISION_PROVIDER_READY_IDENTITY
+
     if "chat_history_messages" in tables:
-        return head_revision
+        return REVISION_CHAT_HISTORY
     if "template_create_infos" in tables:
         return REVISION_TEMPLATE_CREATE_INFO
     if "presentations" in tables:
