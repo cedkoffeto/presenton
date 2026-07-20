@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -17,6 +18,8 @@ from models.presentation_outline_model import PresentationOutlineModel, SlideOut
 from models.presentation_structure_model import PresentationStructureModel
 from models.sql.presentation import PresentationModel
 from models.sql.slide import SlideModel
+from models.sql.integration_client import IntegrationClientModel
+from models.sql.user import UserModel
 from models.sse_response import (
     SSECompleteResponse,
     SSEErrorResponse,
@@ -24,12 +27,15 @@ from models.sse_response import (
     SSETraceResponse,
     SSEResponse,
 )
+from api.v1.admin import router as admin_router
+from api.v1.ppt.endpoints import presentation as presentation_endpoint
 from services.chat.conversation_store import ChatConversationStore
 from services.concurrent_service import ConcurrentService
 from services.export_task_service import EXPORT_TASK_SERVICE
 from templates import get_layout_by_name as tpl_layout_fetcher
 from templates.presentation_layout import PresentationLayoutModel, SlideLayoutModel
 from utils import ocr_language
+from utils.access_control import AuthActor, parse_integration_api_key
 from utils.datetime_utils import get_current_utc_datetime
 from utils.export_utils import export_presentation
 from utils.file_utils import (
@@ -260,6 +266,88 @@ def test_presentation_model_missing_outline_and_structure_returns_none():
     assert ghost.get_structure() is None
 
 
+def test_rotate_integration_key_updates_client_id(monkeypatch):
+    admin_user = UserModel(username="admin", is_admin=True)
+    client = IntegrationClientModel(
+        client_id="client_old",
+        name="Client",
+        key_prefix="old-prefix",
+        secret_hash="old-hash",
+    )
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, model, key):
+            del key
+            if model is IntegrationClientModel:
+                return client
+            return None
+
+        def add(self, _obj):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, _obj):
+            return None
+
+    request = MagicMock()
+    request.state.auth_actor = AuthActor(user=admin_user, team=None)
+    monkeypatch.setattr(
+        admin_router,
+        "async_session_maker",
+        lambda: FakeSession(),
+    )
+
+    response = asyncio.run(admin_router.rotate_integration_key(request, client.id))
+    returned_client_id, _ = parse_integration_api_key(response["api_key"])
+
+    assert client.client_id == returned_client_id
+    assert response["client"]["client_id"] == returned_client_id
+
+
+def test_update_presentation_rejects_non_owner():
+    owner_id = uuid.uuid4()
+    requester = UserModel(username="other", is_admin=False)
+    presentation = PresentationModel(
+        id=uuid.uuid4(),
+        content="c",
+        n_slides=1,
+        language="English",
+        owner_user_id=owner_id,
+        visibility="private",
+    )
+
+    class FakeSession:
+        async def get(self, model, key):
+            del model, key
+            return presentation
+
+        async def commit(self):
+            raise AssertionError("update should not commit without access")
+
+    request = MagicMock()
+    request.state.auth_actor = AuthActor(user=requester, team=None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            presentation_endpoint.update_presentation(
+                request,
+                id=presentation.id,
+                title="Nope",
+                sql_session=FakeSession(),
+            )
+        )
+
+    assert exc.value.status_code == 404
+
+
 def test_presentation_model_set_structure_updates_slides():
     _, _, structure_payload = _outline_layout_structure_payloads()
     p = PresentationModel(
@@ -466,6 +554,27 @@ def test_export_includes_optional_fastapi_param():
     asyncio.run(runner())
 
 
+def test_export_cookie_header_mints_session_for_integration_bearer():
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer pct_client.secret"},
+        cookies={},
+        state=SimpleNamespace(auth_username="integration-user"),
+    )
+
+    with patch.object(
+        presentation_endpoint,
+        "validate_session_token",
+        return_value=None,
+    ), patch.object(
+        presentation_endpoint,
+        "create_session_token",
+        return_value="minted-session",
+    ):
+        cookie_header = presentation_endpoint._build_export_cookie_header(request)
+
+    assert cookie_header == "presenton_session=minted-session"
+
+
 def test_export_task_output_permissions_are_readable(tmp_path):
     export_dir = tmp_path / "exports"
     export_dir.mkdir(mode=0o700)
@@ -587,6 +696,10 @@ def test_get_layout_by_name_raises_on_http_failure():
         ), patch(
             "templates.get_layout_by_name.aiohttp.ClientSession",
             return_value=_make_aio_layout_session(resp),
+        ), patch.object(
+            EXPORT_TASK_SERVICE,
+            "extract_schema",
+            new=AsyncMock(side_effect=HTTPException(status_code=500, detail="down")),
         ):
             with pytest.raises(HTTPException):
                 await tpl_layout_fetcher.get_layout_by_name("missing")

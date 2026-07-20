@@ -407,7 +407,8 @@ async def rotate_integration_key(request: Request, integration_id: uuid.UUID):
         if client is None:
             raise HTTPException(status_code=404, detail="Integration not found")
 
-        _, key_prefix, api_key = generate_integration_api_key()
+        client_id, key_prefix, api_key = generate_integration_api_key()
+        client.client_id = client_id
         client.key_prefix = key_prefix
         client.secret_hash = hash_client_secret(api_key.split(".", 1)[1])
         sql_session.add(client)

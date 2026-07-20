@@ -10,9 +10,14 @@ from models.generate_presentation_request import GeneratePresentationRequest
 from models.presentation_and_path import PresentationAndPath
 from models.presentation_outline_model import SlideOutlineModel
 from models.presentation_structure_model import PresentationStructureModel
+from models.sql.async_presentation_generation_status import (
+    AsyncPresentationGenerationTaskModel,
+)
 from models.sql.presentation import PresentationModel
+from models.sql.user import UserModel
 from templates.presentation_layout import PresentationLayoutModel, SlideLayoutModel
 from tests.conftest import FakeAsyncSession
+from utils.access_control import AuthActor
 
 
 def _run(coro):
@@ -121,6 +126,7 @@ def test_generate_presentation_handler_full_flow_uses_mocked_dependencies(fake_a
 
 def test_prepare_presentation_preserves_payload_icon_weight():
     presentation_id = uuid.uuid4()
+    user = UserModel(username="user")
     presentation = PresentationModel(
         id=presentation_id,
         content="deck",
@@ -129,7 +135,10 @@ def test_prepare_presentation_preserves_payload_icon_weight():
         tone="default",
         verbosity="standard",
         instructions=None,
+        owner_user_id=user.id,
     )
+    request = Mock()
+    request.state.auth_actor = AuthActor(user=user, team=None)
     session = FakeAsyncSession(get_results={presentation_id: presentation})
     layout = PresentationLayoutModel(
         name="swift",
@@ -154,11 +163,12 @@ def test_prepare_presentation_preserves_payload_icon_weight():
         "store_generated_outlines",
         new=AsyncMock(),
     ):
-        response = _run(
-            presentation_endpoint.prepare_presentation(
-                presentation_id=presentation_id,
-                outlines=[SlideOutlineModel(content="## Causes")],
-                layout=layout,
+            response = _run(
+                presentation_endpoint.prepare_presentation(
+                    request_http=request,
+                    presentation_id=presentation_id,
+                    outlines=[SlideOutlineModel(content="## Causes")],
+                    layout=layout,
                 sql_session=session,
             )
         )
@@ -170,6 +180,7 @@ def test_prepare_presentation_preserves_payload_icon_weight():
 
 def test_prepare_presentation_clears_stale_language_for_reviewed_outlines():
     presentation_id = uuid.uuid4()
+    user = UserModel(username="user")
     presentation = PresentationModel(
         id=presentation_id,
         content="global warming deck",
@@ -178,7 +189,10 @@ def test_prepare_presentation_clears_stale_language_for_reviewed_outlines():
         tone="default",
         verbosity="standard",
         instructions=None,
+        owner_user_id=user.id,
     )
+    request = Mock()
+    request.state.auth_actor = AuthActor(user=user, team=None)
     session = FakeAsyncSession(get_results={presentation_id: presentation})
     layout = PresentationLayoutModel(
         name="swift",
@@ -202,11 +216,12 @@ def test_prepare_presentation_clears_stale_language_for_reviewed_outlines():
         "store_generated_outlines",
         new=AsyncMock(),
     ):
-        response = _run(
-            presentation_endpoint.prepare_presentation(
-                presentation_id=presentation_id,
-                outlines=[SlideOutlineModel(content="## 全球变暖的原因")],
-                layout=layout,
+            response = _run(
+                presentation_endpoint.prepare_presentation(
+                    request_http=request,
+                    presentation_id=presentation_id,
+                    outlines=[SlideOutlineModel(content="## 全球变暖的原因")],
+                    layout=layout,
                 sql_session=session,
             )
         )
@@ -273,3 +288,77 @@ def test_generate_presentation_handler_rejects_invalid_llm_json(fake_async_sessi
 
     assert exc.value.status_code == 400
     assert "Failed to generate presentation outlines" in exc.value.detail
+
+
+def test_async_background_uses_fresh_database_session(monkeypatch):
+    request = GeneratePresentationRequest(
+        content="Generate a small deck",
+        n_slides=2,
+        language="English",
+        export_as="pdf",
+        template="general",
+    )
+    presentation_id = uuid.uuid4()
+    async_status = AsyncPresentationGenerationTaskModel(
+        id="task-test",
+        status="pending",
+        message="Queued",
+    )
+    captured = {}
+
+    class BackgroundSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, model, key):
+            captured["get"] = (model, key)
+            return async_status
+
+    async def fake_handler(
+        request,
+        presentation_id,
+        actor,
+        async_status=None,
+        export_cookie_header=None,
+        sql_session=None,
+    ):
+        captured["handler"] = {
+            "request": request,
+            "presentation_id": presentation_id,
+            "actor": actor,
+            "async_status": async_status,
+            "export_cookie_header": export_cookie_header,
+            "sql_session": sql_session,
+        }
+
+    monkeypatch.setattr(
+        presentation_endpoint,
+        "async_session_maker",
+        lambda: BackgroundSession(),
+    )
+    monkeypatch.setattr(
+        presentation_endpoint,
+        "generate_presentation_handler",
+        fake_handler,
+    )
+
+    _run(
+        presentation_endpoint._generate_presentation_async_background(
+            request,
+            presentation_id,
+            None,
+            async_status.id,
+            "presenton_session=token",
+        )
+    )
+
+    assert captured["get"] == (
+        AsyncPresentationGenerationTaskModel,
+        async_status.id,
+    )
+    assert captured["handler"]["sql_session"].__class__ is BackgroundSession
+    assert captured["handler"]["async_status"] is async_status
+    assert captured["handler"]["export_cookie_header"] == "presenton_session=token"

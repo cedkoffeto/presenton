@@ -208,6 +208,8 @@ async function runBundledPresentationExportLocked(params: {
     process.env.TEMP_DIRECTORY?.trim() || path.join(os.tmpdir(), "presenton");
   await fs.mkdir(tempBase, { recursive: true });
   const workDir = await fs.mkdtemp(path.join(tempBase, "export-"));
+  const puppeteerTempDir = path.join(workDir, "puppeteer");
+  await fs.mkdir(puppeteerTempDir, { recursive: true });
   const exportTaskPath = path.join(workDir, "export_task.json");
 
   const exportTask = {
@@ -236,6 +238,7 @@ async function runBundledPresentationExportLocked(params: {
         env: {
           ...process.env,
           BUILT_PYTHON_MODULE_PATH: converter,
+          PUPPETEER_TMP_DIR: puppeteerTempDir,
         },
       });
       const stderr = new BoundedTextBuffer();

@@ -52,7 +52,7 @@ from models.sql.slide import SlideModel
 from models.sql.presentation_layout_code import PresentationLayoutCodeModel
 from models.sse_response import SSECompleteResponse, SSEErrorResponse, SSEResponse
 
-from services.database import get_async_session
+from services.database import async_session_maker, get_async_session
 from services.concurrent_service import CONCURRENT_SERVICE
 from models.sql.presentation import PresentationModel
 from models.sql.async_presentation_generation_status import (
@@ -86,6 +86,7 @@ from utils.simple_auth import (
     SESSION_COOKIE_NAME,
     create_session_token,
     get_session_token_from_request,
+    validate_session_token,
 )
 from utils.web_search import get_selected_web_search_provider, get_web_search_route
 from models.presentation_layout import PresentationLayoutModel
@@ -96,6 +97,22 @@ logger = logging.getLogger(__name__)
 
 
 PRESENTATION_ROUTER = APIRouter(prefix="/presentation", tags=["Presentation"])
+
+
+def _log_generation_stage(
+    stage: str,
+    *,
+    presentation_id: uuid.UUID,
+    template: Optional[str] = None,
+    details: Optional[str] = None,
+) -> None:
+    logger.info(
+        "[presentation.generate] stage=%s presentation_id=%s%s%s",
+        stage,
+        presentation_id,
+        f" template={template}" if template else "",
+        f" details={details}" if details else "",
+    )
 
 
 def _extract_custom_template_id(layout_name: Optional[str]) -> Optional[uuid.UUID]:
@@ -163,7 +180,7 @@ def _build_export_cookie_header(request: Request) -> Optional[str]:
         return cookie_header
 
     session_token = get_session_token_from_request(request)
-    if session_token:
+    if session_token and validate_session_token(session_token):
         return f"{SESSION_COOKIE_NAME}={session_token}"
 
     username = getattr(request.state, "auth_username", None)
@@ -693,6 +710,7 @@ async def stream_presentation(
 
 @PRESENTATION_ROUTER.patch("/update", response_model=PresentationWithSlides)
 async def update_presentation(
+    request: Request,
     id: Annotated[uuid.UUID, Body()],
     n_slides: Annotated[Optional[int], Body()] = None,
     title: Annotated[Optional[str], Body()] = None,
@@ -703,6 +721,13 @@ async def update_presentation(
     presentation = await sql_session.get(PresentationModel, id)
     if not presentation:
         raise HTTPException(status_code=404, detail="Presentation not found")
+    actor = get_request_actor(request)
+    require_resource_access(
+        actor,
+        owner_user_id=presentation.owner_user_id,
+        team_id=presentation.team_id,
+        visibility=presentation.visibility,
+    )
 
     presentation_update_dict = {}
     if n_slides is not None:
@@ -814,6 +839,12 @@ async def generate_presentation_handler(
     sql_session: AsyncSession = Depends(get_async_session),
 ):
     try:
+        _log_generation_stage(
+            "start",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"export_as={request.export_as}",
+        )
         using_slides_markdown = False
         language_to_use = (request.language or "").strip() or None
         additional_context = ""
@@ -829,6 +860,11 @@ async def generate_presentation_handler(
                 async_status.updated_at = datetime.now()
                 sql_session.add(async_status)
                 await sql_session.commit()
+            _log_generation_stage(
+                "outlines_start",
+                presentation_id=presentation_id,
+                template=request.template,
+            )
 
             if request.files:
                 documents_loader = DocumentsLoader(
@@ -925,6 +961,12 @@ async def generate_presentation_handler(
                 )
 
             total_outlines = len(presentation_outlines.slides)
+            _log_generation_stage(
+                "outlines_ready",
+                presentation_id=presentation_id,
+                template=request.template,
+                details=f"count={total_outlines}",
+            )
 
         else:
             # Setting outlines to slides markdown
@@ -935,6 +977,12 @@ async def generate_presentation_handler(
                 ]
             )
             total_outlines = len(request.slides_markdown)
+            _log_generation_stage(
+                "slides_markdown_ready",
+                presentation_id=presentation_id,
+                template=request.template,
+                details=f"count={total_outlines}",
+            )
 
             await MEM0_PRESENTATION_MEMORY_SERVICE.store_generation_context(
                 presentation_id=presentation_id,
@@ -956,22 +1004,26 @@ async def generate_presentation_handler(
             async_status.updated_at = datetime.now()
             sql_session.add(async_status)
             await sql_session.commit()
+        _log_generation_stage(
+            "layout_start",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"outlines={total_outlines}",
+        )
 
         print("-" * 40)
         print(f"Generated {total_outlines} outlines for the presentation")
 
-        logger.info(
-            "[presentation.generate] loading layout template=%r presentation_id=%s",
-            request.template,
-            presentation_id,
-        )
         layout_model = await get_layout_by_name(request.template)
-        logger.info(
-            "[presentation.generate] layout ready template=%r slides=%d ordered=%s icon_weight=%s",
-            request.template,
-            len(layout_model.slides),
-            layout_model.ordered,
-            layout_model.icon_weight,
+        _log_generation_stage(
+            "layout_ready",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=(
+                f"slides={len(layout_model.slides)} "
+                f"ordered={layout_model.ordered} "
+                f"icon_weight={layout_model.icon_weight}"
+            ),
         )
         total_slide_layouts = len(layout_model.slides)
 
@@ -979,6 +1031,16 @@ async def generate_presentation_handler(
         if layout_model.ordered:
             presentation_structure = layout_model.to_presentation_structure()
         else:
+            if async_status:
+                async_status.message = "Choosing slide layouts"
+                async_status.updated_at = datetime.now()
+                sql_session.add(async_status)
+                await sql_session.commit()
+            _log_generation_stage(
+                "structure_start",
+                presentation_id=presentation_id,
+                template=request.template,
+            )
             presentation_structure: PresentationStructureModel = (
                 await generate_presentation_structure(
                     presentation_outlines,
@@ -986,6 +1048,12 @@ async def generate_presentation_handler(
                     request.instructions,
                     using_slides_markdown,
                 )
+            )
+            _log_generation_stage(
+                "structure_ready",
+                presentation_id=presentation_id,
+                template=request.template,
+                details=f"slides={len(presentation_structure.slides)}",
             )
 
         presentation_structure.slides = presentation_structure.slides[:total_outlines]
@@ -1059,6 +1127,12 @@ async def generate_presentation_handler(
 
         slide_layout_indices = presentation_structure.slides
         slide_layouts = [layout_model.slides[idx] for idx in slide_layout_indices]
+        _log_generation_stage(
+            "slides_start",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"slides={len(slide_layouts)}",
+        )
 
         # Schedule slide content generation and asset fetching in batches of 10
         batch_size = 10
@@ -1123,6 +1197,11 @@ async def generate_presentation_handler(
             async_status.updated_at = datetime.now()
             sql_session.add(async_status)
             await sql_session.commit()
+        _log_generation_stage(
+            "assets_start",
+            presentation_id=presentation_id,
+            template=request.template,
+        )
 
         # Run all asset tasks concurrently while batches may still be generating content
         generated_assets_list = await asyncio.gather(*async_assets_generation_tasks)
@@ -1132,6 +1211,12 @@ async def generate_presentation_handler(
         if actor is not None:
             for asset in generated_assets:
                 apply_actor_ownership(asset, actor, presentation.visibility)
+        _log_generation_stage(
+            "assets_ready",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"count={len(generated_assets)}",
+        )
 
         # 8. Save PresentationModel and Slides
         sql_session.add(presentation)
@@ -1143,6 +1228,12 @@ async def generate_presentation_handler(
             async_status.message = "Exporting presentation"
             async_status.updated_at = datetime.now()
             sql_session.add(async_status)
+        _log_generation_stage(
+            "export_start",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"format={request.export_as}",
+        )
 
         # 9. Export
         presentation_and_path = await export_presentation(
@@ -1166,6 +1257,12 @@ async def generate_presentation_handler(
             async_status.updated_at = datetime.now()
             sql_session.add(async_status)
             await sql_session.commit()
+        _log_generation_stage(
+            "complete",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=f"path={response.path}",
+        )
 
         # Triggering webhook on success
         CONCURRENT_SERVICE.run_task(
@@ -1178,6 +1275,12 @@ async def generate_presentation_handler(
         return response
 
     except Exception as e:
+        _log_generation_stage(
+            "failed",
+            presentation_id=presentation_id,
+            template=request.template,
+            details=repr(e),
+        )
         if not isinstance(e, HTTPException):
             traceback.print_exc()
             e = HTTPException(status_code=500, detail="Presentation generation failed")
@@ -1202,6 +1305,36 @@ async def generate_presentation_handler(
 
         else:
             raise e
+
+
+async def _generate_presentation_async_background(
+    request: GeneratePresentationRequest,
+    presentation_id: uuid.UUID,
+    actor,
+    async_status_id: str,
+    export_cookie_header: Optional[str],
+):
+    async with async_session_maker() as background_session:
+        async_status = await background_session.get(
+            AsyncPresentationGenerationTaskModel,
+            async_status_id,
+        )
+        if async_status is None:
+            logger.error(
+                "[presentation.generate] async status missing task_id=%s presentation_id=%s",
+                async_status_id,
+                presentation_id,
+            )
+            return
+
+        await generate_presentation_handler(
+            request,
+            presentation_id,
+            actor,
+            async_status=async_status,
+            export_cookie_header=export_cookie_header,
+            sql_session=background_session,
+        )
 
 
 @PRESENTATION_ROUTER.post("/generate", response_model=PresentationPathAndEditPath)
@@ -1252,13 +1385,12 @@ async def generate_presentation_async(
         await sql_session.commit()
 
         background_tasks.add_task(
-            generate_presentation_handler,
+            _generate_presentation_async_background,
             request,
             presentation_id,
             actor,
-            async_status=async_status,
-            export_cookie_header=_build_export_cookie_header(request_http),
-            sql_session=sql_session,
+            async_status.id,
+            _build_export_cookie_header(request_http),
         )
         return async_status
 

@@ -25,6 +25,18 @@ EXPORT_DIRECTORY_MODE = 0o755
 EXPORT_FILE_MODE = 0o644
 
 
+def _env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOGGER.warning("[export_runtime] invalid integer env %s=%r", name, raw)
+        return default
+    return min(max(value, minimum), maximum)
+
+
 def _windows_hidden_subprocess_kwargs() -> dict[str, object]:
     if os.name != "nt":
         return {}
@@ -80,8 +92,22 @@ class ExportTaskService:
         self.timeout_seconds = timeout_seconds
         self.node_binary = os.getenv("LITEPARSE_NODE_BINARY", "node")
         self.export_dir = self._resolve_export_dir()
+        self.app_root = self._resolve_app_root(self.export_dir)
         self.entrypoint_path = self._resolve_entrypoint_path(self.export_dir)
         self.converter_path = self._resolve_converter_path(self.export_dir)
+        self.concurrency = _env_int(
+            "PRESENTON_EXPORT_CONCURRENCY",
+            default=1,
+            minimum=1,
+            maximum=8,
+        )
+        self.browser_launch_retries = _env_int(
+            "PRESENTON_EXPORT_BROWSER_LAUNCH_RETRIES",
+            default=2,
+            minimum=0,
+            maximum=5,
+        )
+        self._semaphore = asyncio.Semaphore(self.concurrency)
 
     @staticmethod
     def _resolve_export_dir() -> str:
@@ -109,6 +135,17 @@ class ExportTaskService:
                 return candidate
 
         return candidates[0]
+
+    @staticmethod
+    def _resolve_app_root(export_dir: str) -> str:
+        configured = (os.getenv("PRESENTON_APP_ROOT") or "").strip()
+        if configured:
+            return configured
+
+        if os.path.basename(os.path.normpath(export_dir)) == "presentation-export":
+            return os.path.dirname(os.path.normpath(export_dir))
+
+        return os.path.abspath(".")
 
     @staticmethod
     def _resolve_entrypoint_path(export_dir: str) -> str:
@@ -146,7 +183,10 @@ class ExportTaskService:
                 return candidate
         return candidates[1]
 
-    def _build_node_env(self) -> Mapping[str, str]:
+    def _build_node_env(
+        self,
+        puppeteer_temp_directory: str | None = None,
+    ) -> Mapping[str, str]:
         env = os.environ.copy()
 
         app_data_directory = get_app_data_directory_env()
@@ -163,11 +203,11 @@ class ExportTaskService:
         os.makedirs(temp_directory, exist_ok=True)
         env["TEMP_DIRECTORY"] = temp_directory
 
-        puppeteer_temp_directory = (
+        resolved_puppeteer_temp_directory = puppeteer_temp_directory or (
             env.get("PUPPETEER_TMP_DIR") or os.path.join(temp_directory, "puppeteer")
         )
-        os.makedirs(puppeteer_temp_directory, exist_ok=True)
-        env["PUPPETEER_TMP_DIR"] = puppeteer_temp_directory
+        os.makedirs(resolved_puppeteer_temp_directory, exist_ok=True)
+        env["PUPPETEER_TMP_DIR"] = resolved_puppeteer_temp_directory
 
         puppeteer_cache_directory = env.get("PUPPETEER_CACHE_DIR") or os.path.join(
             temp_directory, "puppeteer-cache"
@@ -243,7 +283,38 @@ class ExportTaskService:
         return temp_dir, task_path, response_path
 
     async def _run_task(self, task_payload: dict, response_error_detail: str) -> dict:
-        return await self._run_task_locked(task_payload, response_error_detail)
+        async with self._semaphore:
+            attempts = self.browser_launch_retries + 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    return await self._run_task_locked(
+                        task_payload, response_error_detail
+                    )
+                except HTTPException as exc:
+                    if attempt >= attempts or not self._is_browser_launch_conflict(
+                        exc
+                    ):
+                        raise
+
+                    LOGGER.warning(
+                        "[export_runtime] browser launch conflict task_type=%s "
+                        "attempt=%s/%s detail=%s",
+                        task_payload.get("type"),
+                        attempt,
+                        attempts,
+                        _snippet(str(exc.detail)),
+                    )
+                    await asyncio.sleep(min(0.25 * attempt, 1.0))
+
+            raise HTTPException(status_code=500, detail=response_error_detail)
+
+    @staticmethod
+    def _is_browser_launch_conflict(exc: HTTPException) -> bool:
+        detail = str(exc.detail)
+        return (
+            "Failed to launch browser" in detail
+            and "The browser is already running for" in detail
+        )
 
     async def _run_task_locked(self, task_payload: dict, response_error_detail: str) -> dict:
         self._ensure_runtime_ready()
@@ -257,12 +328,19 @@ class ExportTaskService:
                 LOGGER,
                 "export_task.spawn",
                 task_type=task_payload.get("type"),
+                concurrency=self.concurrency,
             )
             result = await self._run_bounded_child(
                 [self.node_binary, self.entrypoint_path, task_path],
-                cwd=self.export_dir,
+                cwd=self.app_root,
                 timeout=self.timeout_seconds,
-                env=dict(self._build_node_env()),
+                env=dict(
+                    self._build_node_env(
+                        puppeteer_temp_directory=os.path.join(
+                            temp_dir, "puppeteer"
+                        ),
+                    )
+                ),
             )
             log_memory(
                 LOGGER,
@@ -322,8 +400,10 @@ class ExportTaskService:
         )
 
         LOGGER.info(
-            "[export_runtime] child started pid=%s command=%s",
+            "[export_runtime] child started pid=%s task_tmp=%s puppeteer_tmp=%s command=%s",
             process.pid,
+            os.path.dirname(command[-1]) if command else "",
+            env.get("PUPPETEER_TMP_DIR", ""),
             _command_str(command),
         )
 
@@ -513,10 +593,11 @@ class ExportTaskService:
     async def extract_schema(self, url: str) -> ExtractSchemaDocument:
         LOGGER.info(
             "[export_runtime] extract_schema spawn "
-            "url=%s entrypoint=%s export_dir=%s",
+            "url=%s entrypoint=%s export_dir=%s app_root=%s",
             url,
             self.entrypoint_path,
             self.export_dir,
+            self.app_root,
         )
         try:
             response_data = await self._run_task(

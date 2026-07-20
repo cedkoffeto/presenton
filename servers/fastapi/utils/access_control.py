@@ -161,9 +161,22 @@ async def get_or_create_user(
     team: Optional[TeamModel] = None,
 ) -> UserModel:
     existing = await sql_session.scalar(select(UserModel).where(UserModel.username == username))
+    existing_by_email = None
+    if email:
+        existing_by_email = await sql_session.scalar(
+            select(UserModel).where(UserModel.email == email)
+        )
+
+    if existing is None and existing_by_email is not None:
+        existing = existing_by_email
+
     if existing:
         changed = False
-        if email and existing.email != email:
+        if (
+            email
+            and existing.email != email
+            and (existing_by_email is None or existing_by_email.id == existing.id)
+        ):
             existing.email = email
             changed = True
         if display_name and existing.display_name != display_name:
@@ -287,11 +300,27 @@ async def resolve_integration_actor(
     await sql_session.refresh(integration_client)
 
     external_user_id = (request.headers.get("X-Presenton-User-Id") or "").strip()
-    username = (request.headers.get("X-Presenton-Username") or external_user_id).strip()
-    if not username:
-        raise HTTPException(status_code=400, detail="Missing X-Presenton-User-Id or X-Presenton-Username")
-
+    raw_username = (request.headers.get("X-Presenton-Username") or "").strip()
     email = (request.headers.get("X-Presenton-User-Email") or "").strip() or None
+    username = (raw_username or external_user_id).strip()
+    if not username and email:
+        existing_by_email = await sql_session.scalar(
+            select(UserModel).where(UserModel.email == email)
+        )
+        username = (
+            existing_by_email.username.strip()
+            if existing_by_email and existing_by_email.username
+            else email
+        )
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing integration user identity. Provide at least one of "
+                "X-Presenton-User-Id, X-Presenton-Username, or X-Presenton-User-Email"
+            ),
+        )
+
     display_name = (request.headers.get("X-Presenton-User-Name") or username).strip()
     team_slug = (
         request.headers.get("X-Presenton-Team-Slug")
@@ -310,6 +339,18 @@ async def resolve_integration_actor(
     existing_user = await sql_session.scalar(
         select(UserModel).where(UserModel.username == username)
     )
+    if existing_user is not None and email:
+        existing_by_email = await sql_session.scalar(
+            select(UserModel).where(UserModel.email == email)
+        )
+        if existing_by_email is not None and existing_by_email.id != existing_user.id:
+            existing_user = existing_by_email
+            username = existing_by_email.username.strip()
+            display_name = (
+                request.headers.get("X-Presenton-User-Name")
+                or existing_by_email.display_name
+                or username
+            ).strip()
     if existing_user is None and not integration_client.auto_provision_users:
         raise HTTPException(status_code=403, detail="Integration user provisioning is disabled")
 

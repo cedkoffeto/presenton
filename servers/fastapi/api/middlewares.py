@@ -1,4 +1,4 @@
-from fastapi import Request
+from fastapi import HTTPException, Request
 from starlette.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -72,12 +72,18 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
             request.state.auth_actor = actor
             return await call_next(request)
 
-        async with async_session_maker() as session:
-            integration_actor = await resolve_integration_actor(request, session)
-            if integration_actor:
-                request.state.auth_username = integration_actor.user.username
-                request.state.auth_actor = integration_actor
-                return await call_next(request)
+        try:
+            async with async_session_maker() as session:
+                integration_actor = await resolve_integration_actor(request, session)
+                if integration_actor:
+                    request.state.auth_username = integration_actor.user.username
+                    request.state.auth_actor = integration_actor
+                    return await call_next(request)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
 
         auth_status = get_auth_status(get_session_token_from_request(request))
         if not auth_status["configured"]:

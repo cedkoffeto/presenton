@@ -470,6 +470,7 @@ const setupUserConfigFromEnv = () => {
 };
 
 const startServers = async (nginxReadyPromise) => {
+  const fastApiLogLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
   const fastApiProcess = spawn(
     "python",
     [
@@ -479,7 +480,7 @@ const startServers = async (nginxReadyPromise) => {
       "--reload",
       isDev ? "true" : "false",
       "--log-level",
-      isDev ? "info" : "warning",
+      fastApiLogLevel,
     ],
     {
       cwd: fastapiDir,
