@@ -14,6 +14,8 @@ export interface CloneLayoutPayload {
     layout_name?: string;
 }
 
+export type TemplateVisibility = "private" | "team" | "public";
+
 class TemplateService {
 
     static async getCustomTemplateSummaries() {
@@ -42,6 +44,21 @@ class TemplateService {
             return await ApiResponseHandler.handleResponseWithResult(response, "Failed to delete custom template");
         } catch (error) {
             console.error("Failed to delete custom template", error);
+            throw error;
+        }
+    }
+
+    static async updateCustomTemplateAccess(templateId: string, visibility: TemplateVisibility) {
+        try {
+            const cleanedId = templateId.startsWith("custom-") ? templateId.slice("custom-".length) : templateId;
+            const response = await fetch(getApiUrl(`/api/v1/ppt/template/${cleanedId}/access`), {
+                method: "PATCH",
+                headers: getHeader(),
+                body: JSON.stringify({ visibility }),
+            });
+            return await ApiResponseHandler.handleResponse(response, "Failed to update template access");
+        } catch (error) {
+            console.error("Failed to update template access", error);
             throw error;
         }
     }

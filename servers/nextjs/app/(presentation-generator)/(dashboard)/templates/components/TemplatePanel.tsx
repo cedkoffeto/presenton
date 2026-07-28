@@ -2,7 +2,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
-import { ArrowUpRight, ChevronRight, Loader2 } from "lucide-react";
+import { ArrowUpRight, ChevronRight, Globe2, Loader2, Lock, Users } from "lucide-react";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
 import { templates } from "@/app/presentation-templates";
 import { TemplateLayoutsWithSettings } from "@/app/presentation-templates/utils";
 import {
@@ -13,6 +20,8 @@ import {
 import CreateCustomTemplate from "./CreateCustomTemplate";
 import Link from "next/link";
 import { trackEvent, MixpanelEvent } from "@/utils/mixpanel";
+import TemplateService, { TemplateVisibility } from "@/app/(presentation-generator)/services/api/template";
+import { notify } from "@/components/ui/sonner";
 import {
     TemplatePreviewStage,
     LayoutsBadge,
@@ -20,7 +29,30 @@ import {
     CustomTemplatePreview,
 } from "../../../components/TemplatePreviewComponents";
 
-export const CustomTemplateCard = React.memo(function CustomTemplateCard({ template }: { template: CustomTemplates }) {
+const VISIBILITY_OPTIONS: Array<{ value: TemplateVisibility; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { value: "private", label: "Private", icon: Lock },
+    { value: "team", label: "Team", icon: Users },
+    { value: "public", label: "Public", icon: Globe2 },
+];
+
+function VisibilityBadge({ visibility }: { visibility: TemplateVisibility }) {
+    const option = VISIBILITY_OPTIONS.find((item) => item.value === visibility) ?? VISIBILITY_OPTIONS[0];
+    const Icon = option.icon;
+    return (
+        <span className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[#EDEEEF] bg-[#F7F6F9] px-2.5 text-[11px] font-semibold text-[#4C4D50]">
+            <Icon className="h-3.5 w-3.5" />
+            {option.label}
+        </span>
+    );
+}
+
+export const CustomTemplateCard = React.memo(function CustomTemplateCard({
+    template,
+    onAccessChange,
+}: {
+    template: CustomTemplates;
+    onAccessChange: (template: CustomTemplates, visibility: TemplateVisibility) => void;
+}) {
     const router = useRouter();
     const { previewLayouts, loading } = useCustomTemplatePreview(`${template.id}`);
     const handleOpen = useCallback(() => {
@@ -45,9 +77,36 @@ export const CustomTemplateCard = React.memo(function CustomTemplateCard({ templ
                     templateId={template.id}
                 />
             </TemplatePreviewStage>
-            <div className="relative z-40 flex items-center justify-between border-t border-[#EDEEEF] bg-white px-6 py-5">
-                <h3 className="max-w-[min(191px,65%)] text-base font-bold text-gray-900">{template.name}</h3>
-                <ArrowUpRight className="h-4 w-4 shrink-0 text-gray-400 transition-colors group-hover:text-purple-600" />
+            <div className="relative z-40 border-t border-[#EDEEEF] bg-white px-6 py-5">
+                <div className="flex items-center justify-between gap-4">
+                    <h3 className="min-w-0 flex-1 truncate text-base font-bold text-gray-900">{template.name}</h3>
+                    <ArrowUpRight className="h-4 w-4 shrink-0 text-gray-400 transition-colors group-hover:text-purple-600" />
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-3">
+                    {template.canEditAccess ? (
+                        <Select
+                            value={template.visibility}
+                            onValueChange={(value) => onAccessChange(template, value as TemplateVisibility)}
+                        >
+                            <SelectTrigger
+                                className="h-8 w-[122px] rounded-full border-[#EDEEEF] bg-[#F7F6F9] px-3 text-[11px] font-semibold text-[#4C4D50] shadow-none"
+                                onClick={(event) => event.stopPropagation()}
+                            >
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent onClick={(event) => event.stopPropagation()}>
+                                {VISIBILITY_OPTIONS.map((option) => (
+                                    <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    ) : (
+                        <VisibilityBadge visibility={template.visibility} />
+                    )}
+                    <span className="text-xs font-medium text-gray-400">{template.layoutCount} layouts</span>
+                </div>
             </div>
         </Card>
     );
@@ -55,7 +114,9 @@ export const CustomTemplateCard = React.memo(function CustomTemplateCard({ templ
     return (
         prev.template.id === next.template.id &&
         prev.template.name === next.template.name &&
-        prev.template.layoutCount === next.template.layoutCount
+        prev.template.layoutCount === next.template.layoutCount &&
+        prev.template.visibility === next.template.visibility &&
+        prev.template.canEditAccess === next.template.canEditAccess
     );
 });
 
@@ -92,7 +153,7 @@ const InbuiltTemplateCard = React.memo(function InbuiltTemplateCard({
 const LayoutPreview = () => {
     const [tab, setTab] = useState<'custom' | 'default'>('default');
     const router = useRouter();
-    const { templates: customTemplates, loading: customLoading } = useCustomTemplateSummaries();
+    const { templates: customTemplates, loading: customLoading, refetch: refetchCustomTemplates } = useCustomTemplateSummaries();
 
     useEffect(() => {
         trackEvent(MixpanelEvent.Templates_Page_Viewed);
@@ -120,9 +181,25 @@ const LayoutPreview = () => {
         return { nonNeoInbuilt: nonNeo, neoInbuilt: neo };
     }, []);
 
+    const handleTemplateAccessChange = useCallback(async (template: CustomTemplates, visibility: TemplateVisibility) => {
+        try {
+            await TemplateService.updateCustomTemplateAccess(template.id, visibility);
+            await refetchCustomTemplates();
+            notify.success("Template access updated", `${template.name} is now ${visibility}.`);
+        } catch (error: any) {
+            notify.error("Could not update template access", error?.message || "Something went wrong while updating access.");
+        }
+    }, [refetchCustomTemplates]);
+
     const customTemplateCards = useMemo(
-        () => customTemplates.map((template: CustomTemplates) => <CustomTemplateCard key={template.id} template={template} />),
-        [customTemplates],
+        () => customTemplates.map((template: CustomTemplates) => (
+            <CustomTemplateCard
+                key={template.id}
+                template={template}
+                onAccessChange={handleTemplateAccessChange}
+            />
+        )),
+        [customTemplates, handleTemplateAccessChange],
     );
 
     return (

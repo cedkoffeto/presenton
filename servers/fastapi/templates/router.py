@@ -28,6 +28,7 @@ from templates.handler import (
     save_slide_layout,
     save_template,
     update_template,
+    update_template_access,
     upload_fonts_and_slides_preview,
 )
 from templates.slide_layout_jobs import (
@@ -73,6 +74,9 @@ TEMPLATE_ROUTER.post(
 TEMPLATE_ROUTER.post("/save", response_model=SaveTemplateResponse)(save_template)
 TEMPLATE_ROUTER.post("/clone", response_model=SaveTemplateResponse)(clone_template)
 TEMPLATE_ROUTER.put("/update", response_model=SaveTemplateResponse)(update_template)
+TEMPLATE_ROUTER.patch("/{template_id}/access", response_model=SaveTemplateResponse)(
+    update_template_access
+)
 TEMPLATE_ROUTER.post("/slide-layout/save", status_code=200)(save_slide_layout)
 TEMPLATE_ROUTER.post("/slide-layout/clone", response_model=SaveTemplateLayoutData)(
     clone_slide_layout

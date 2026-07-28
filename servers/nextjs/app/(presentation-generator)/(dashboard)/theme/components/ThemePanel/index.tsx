@@ -8,9 +8,19 @@ import {
   SquarePen,
   RefreshCcw,
   ChevronRight,
-  Plus
+  Plus,
+  Lock,
+  Users,
+  Globe2,
 } from 'lucide-react'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
 
 import { ThemeColors } from './types'
@@ -65,7 +75,16 @@ const FALLBACK_THEME: Theme = {
       textFont: { name: 'Inter', url: 'https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap' },
     },
   },
+  visibility: 'private',
 }
+type AccessVisibility = 'private' | 'team' | 'public'
+
+const ACCESS_OPTIONS: Array<{ value: AccessVisibility; label: string; description: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { value: 'private', label: 'Private', description: 'Only you can use it.', icon: Lock },
+  { value: 'team', label: 'Team', description: 'Available to your team.', icon: Users },
+  { value: 'public', label: 'Public', description: 'Visible to everyone with access.', icon: Globe2 },
+]
+
 const ThemePanel: React.FC = () => {
   const searchParams = useSearchParams()
   const pathname = usePathname()
@@ -86,6 +105,7 @@ const ThemePanel: React.FC = () => {
   const [isSheetOpen, setIsSheetOpen] = useState(false)
   const [currentStep, setCurrentStep] = useState(1)
   const [themeCompanyName, setThemeCompanyName] = useState('')
+  const [themeVisibility, setThemeVisibility] = useState<AccessVisibility>('private')
   const [isNewTheme, setIsNewTheme] = useState(false)
   const [userFonts, setUserFonts] = useState<{ fonts: { name: string, url: string }[] }>({ fonts: [] })
 
@@ -215,6 +235,7 @@ const ThemePanel: React.FC = () => {
       setCustomFonts(selectedTheme.data.fonts)
       setCustomBrandLogo(selectedTheme.logo_url || '')
       setCustomBrandLogoId((selectedTheme as any).logo || '')
+      setThemeVisibility((selectedTheme.visibility || 'private') as AccessVisibility)
 
     }
   }, [selectedTheme.id])
@@ -371,6 +392,7 @@ const ThemePanel: React.FC = () => {
       logo: '',
       logo_url: '',
       company_name: '',
+      visibility: 'private',
       data: {
         colors: {
           'primary': '#0000c3',
@@ -411,6 +433,7 @@ const ThemePanel: React.FC = () => {
     setCustomColors(theme.data.colors)
     setCustomFonts(theme.data.fonts)
     setCustomBrandLogo('')
+    setThemeVisibility('private')
     setIsSheetOpen(true)
     setCurrentStep(1)
 
@@ -446,6 +469,7 @@ const ThemePanel: React.FC = () => {
             logo: customBrandLogoId || null,
             logo_url: customBrandLogo || null,
             company_name: themeCompanyName || null,
+            visibility: themeVisibility,
             data: {
               colors: customColors,
               fonts: customFonts,
@@ -487,6 +511,7 @@ const ThemePanel: React.FC = () => {
         logo: customBrandLogoId || null,
         logo_url: customBrandLogo || null,
         company_name: themeCompanyName || null,
+        visibility: themeVisibility,
         data: {
           colors: customColors,
           fonts: customFonts,
@@ -951,6 +976,32 @@ const ThemePanel: React.FC = () => {
             </>
           )}
         </div>
+      </div>
+      <div className="space-y-2">
+        <Label className="flex text-base items-center gap-2">
+          Access
+        </Label>
+        <Select value={themeVisibility} onValueChange={(value) => setThemeVisibility(value as AccessVisibility)}>
+          <SelectTrigger className="h-11 rounded-xl border-[#EDEEEF] bg-[#F6F6F9] shadow-none">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ACCESS_OPTIONS.map((option) => {
+              const Icon = option.icon
+              return (
+                <SelectItem key={option.value} value={option.value}>
+                  <span className="flex items-center gap-2">
+                    <Icon className="h-4 w-4" />
+                    <span>{option.label}</span>
+                  </span>
+                </SelectItem>
+              )
+            })}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-[#808080]">
+          {ACCESS_OPTIONS.find((option) => option.value === themeVisibility)?.description}
+        </p>
       </div>
     </div>
   )

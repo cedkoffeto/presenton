@@ -9,7 +9,9 @@ from sqlmodel import or_, select
 from models.sql.image_asset import ImageAsset
 from models.sql.theme import ThemeModel
 from services.database import get_async_session
+from services.resource_catalog_service import RESOURCE_CATALOG_SERVICE
 from utils.access_control import (
+    ALLOWED_VISIBILITIES,
     VISIBILITY_PRIVATE,
     VISIBILITY_PUBLIC,
     VISIBILITY_TEAM,
@@ -78,6 +80,18 @@ def _normalize_theme(theme: ThemeModel, request: Request, username: str) -> Them
         team_id=str(theme.team_id) if theme.team_id else None,
         public_share_url=_public_share_url(request, theme),
     )
+
+
+def _require_theme_owner(actor, theme: ThemeModel) -> None:
+    if not theme.owner_user_id or theme.owner_user_id != actor.owner_user_id:
+        raise HTTPException(status_code=404, detail="Theme not found")
+
+
+def _validate_visibility(visibility: str) -> str:
+    normalized = (visibility or "").strip().lower()
+    if normalized not in ALLOWED_VISIBILITIES:
+        raise HTTPException(status_code=400, detail="Invalid visibility")
+    return normalized
 
 
 async def _resolve_logo_url(
@@ -153,6 +167,7 @@ async def create_theme(
     sql_session: AsyncSession = Depends(get_async_session),
 ):
     actor = get_request_actor(request)
+    visibility = _validate_visibility(payload.visibility)
     logo_url = payload.logo_url or await _resolve_logo_url(sql_session, actor, payload.logo)
     theme = ThemeModel(
         name=payload.name,
@@ -161,12 +176,13 @@ async def create_theme(
         logo=payload.logo,
         logo_url=logo_url,
         data=payload.data,
-        share_token=generate_share_token() if payload.visibility == VISIBILITY_PUBLIC else None,
+        share_token=generate_share_token() if visibility == VISIBILITY_PUBLIC else None,
     )
-    apply_actor_ownership(theme, actor, payload.visibility)
+    apply_actor_ownership(theme, actor, visibility)
     sql_session.add(theme)
     await sql_session.commit()
     await sql_session.refresh(theme)
+    await RESOURCE_CATALOG_SERVICE.index_theme(theme)
     return _normalize_theme(theme, request, actor.user.username)
 
 
@@ -187,6 +203,7 @@ async def update_theme(
         team_id=theme.team_id,
         visibility=theme.visibility,
     )
+    _require_theme_owner(actor, theme)
     if payload.name is not None:
         theme.name = payload.name
     if payload.description is not None:
@@ -201,17 +218,21 @@ async def update_theme(
     elif payload.logo_url is not None:
         theme.logo_url = payload.logo_url
     if payload.visibility is not None:
-        theme.visibility = payload.visibility
+        _require_theme_owner(actor, theme)
+        theme.visibility = _validate_visibility(payload.visibility)
     if payload.public_share_enabled is True and not theme.share_token:
+        _require_theme_owner(actor, theme)
         theme.share_token = generate_share_token()
         theme.visibility = VISIBILITY_PUBLIC
     elif payload.public_share_enabled is False:
+        _require_theme_owner(actor, theme)
         theme.share_token = None
         if theme.visibility == VISIBILITY_PUBLIC:
             theme.visibility = VISIBILITY_PRIVATE
     sql_session.add(theme)
     await sql_session.commit()
     await sql_session.refresh(theme)
+    await RESOURCE_CATALOG_SERVICE.index_theme(theme)
     return _normalize_theme(theme, request, actor.user.username)
 
 
@@ -231,5 +252,6 @@ async def delete_theme(
         team_id=theme.team_id,
         visibility=theme.visibility,
     )
+    _require_theme_owner(actor, theme)
     await sql_session.delete(theme)
     await sql_session.commit()

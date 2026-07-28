@@ -21,6 +21,10 @@ export interface PresentationResponse {
 
   thumbnail: string;
   slides: any[];
+  visibility?: "private" | "team" | "public";
+  team_id?: string | null;
+  can_edit_access?: boolean;
+  public_share_url?: string | null;
 }
 
 export class DashboardApi {
@@ -82,5 +86,25 @@ export class DashboardApi {
         message: error instanceof Error ? error.message : "Failed to delete presentation",
       };
     }
+  }
+
+  static async updatePresentationAccess(
+    presentationId: string,
+    visibility: "private" | "team" | "public"
+  ): Promise<PresentationResponse> {
+    const response = await fetch(
+      getApiUrl(`/api/v1/ppt/presentation/${presentationId}/access`),
+      {
+        method: "PATCH",
+        headers: getHeader(),
+        body: JSON.stringify({ visibility }),
+        credentials: "include",
+      }
+    );
+
+    return await ApiResponseHandler.handleResponse(
+      response,
+      "Failed to update presentation access"
+    );
   }
 }

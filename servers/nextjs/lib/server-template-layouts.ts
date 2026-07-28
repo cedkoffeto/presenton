@@ -32,6 +32,44 @@ function getIconWeightFromSettings(settings: Record<string, unknown>): string {
   return normalizeIconWeight(settings.icon_weight);
 }
 
+function normalizeTemplateGroupId(directoryName: string): string {
+  return directoryName
+    .replace(/(?<!^)(?=[A-Z])/g, "-")
+    .toLowerCase()
+    .replace(/_/g, "-");
+}
+
+async function resolveBuiltinTemplateDirectory(
+  templatesRoot: string,
+  group: string,
+): Promise<{ id: string; dir: string } | null> {
+  const normalizedGroup = group.trim().toLowerCase().replace(/_/g, "-");
+  const exactDir = path.join(templatesRoot, group);
+
+  try {
+    await fs.access(exactDir);
+    return { id: normalizedGroup, dir: exactDir };
+  } catch {
+    // Fall through to normalized directory lookup.
+  }
+
+  const entries = await fs.readdir(templatesRoot, { withFileTypes: true });
+  const match = entries.find(
+    (entry) =>
+      entry.isDirectory() &&
+      normalizeTemplateGroupId(entry.name) === normalizedGroup,
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    id: normalizedGroup,
+    dir: path.join(templatesRoot, match.name),
+  };
+}
+
 /**
  * Build layout + JSON schemas for a built-in template directory without importing
  * `presentation-templates/index.tsx` (that pulls Recharts/client bundles into RSC).
@@ -48,18 +86,26 @@ export async function buildBuiltinTemplateLayoutPayload(group: string): Promise<
   icon_weight: string;
   slides: BuiltinLayoutSlide[];
 } | null> {
-  const dir = path.join(
+  const templatesRoot = path.join(
     process.cwd(),
     "app",
     "presentation-templates",
-    group,
   );
+  let templateDirectory: { id: string; dir: string } | null = null;
 
   try {
-    await fs.access(dir);
+    templateDirectory = await resolveBuiltinTemplateDirectory(
+      templatesRoot,
+      group,
+    );
   } catch {
     return null;
   }
+  if (!templateDirectory) {
+    return null;
+  }
+
+  const { id: templateId, dir } = templateDirectory;
 
   let ordered = false;
   let icon_weight = DEFAULT_ICON_WEIGHT;
@@ -97,7 +143,7 @@ export async function buildBuiltinTemplateLayoutPayload(group: string): Promise<
     }
     const qualifiedLayoutId = compiled.layoutId.includes(":")
       ? compiled.layoutId
-      : `${group}:${compiled.layoutId}`;
+      : `${templateId}:${compiled.layoutId}`;
     slides.push({
       id: qualifiedLayoutId,
       name: compiled.layoutName,
@@ -110,7 +156,7 @@ export async function buildBuiltinTemplateLayoutPayload(group: string): Promise<
     return null;
   }
 
-  return { name: group, ordered, icon_weight, slides };
+  return { name: templateId, ordered, icon_weight, slides };
 }
 
 export type CustomLayoutCompileInput = {

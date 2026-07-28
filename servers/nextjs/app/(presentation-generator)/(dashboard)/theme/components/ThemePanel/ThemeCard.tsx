@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from 'react'
-import { AlertTriangle, Check, Copy, Trash } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Globe2, Lock, Trash, Users } from 'lucide-react'
 import { Theme } from '@/app/(presentation-generator)/services/api/types'
 import ToolTip from '@/components/ToolTip'
 
@@ -15,6 +15,8 @@ export const ThemeCard: React.FC<ThemeCardProps> = ({ theme, onSelect, onDelete,
   if (!theme.data.colors['graph_0']) { return null }
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [copied, setCopied] = useState(false)
+  const visibility = theme.visibility || 'private'
+  const VisibilityIcon = visibility === 'public' ? Globe2 : visibility === 'team' ? Users : Lock
 
 
 
@@ -84,6 +86,13 @@ export const ThemeCard: React.FC<ThemeCardProps> = ({ theme, onSelect, onDelete,
 
       <img src="/card_bg.svg" alt="" className="absolute top-0 z-[1] left-0 w-[99%] h-full object-cover" />
       <div className=" absolute top-0 left-0 flex items-center justify-between gap-2  z-[2] p-2">
+        {theme.user !== 'system' && <ToolTip content='ACCESS'>
+
+          <p className=" text-xs font-syne  flex gap-1 capitalize  items-center  rounded-[100px]  px-2.5 py-1 bg-white text-[#4C4D50] border border-[#EDEEEF] font-semibold  z-40 ">
+            <VisibilityIcon className="h-3 w-3" />
+            {visibility}
+          </p>
+        </ToolTip>}
         <ToolTip content='Font' >
 
           <p className=" text-xs font-syne  flex gap-1 capitalize  items-center  rounded-[100px]  px-2.5 py-1 bg-[#3A3A3AF5] text-white font-semibold  z-40 ">
@@ -180,6 +189,5 @@ export const ThemeCard: React.FC<ThemeCardProps> = ({ theme, onSelect, onDelete,
   </div>)
 
 }
-
 
 

@@ -20,3 +20,7 @@ class PresentationWithSlides(BaseModel):
     slides: List[SlideModel]
     theme: Optional[dict] = None
     fonts: Optional[Any] = None
+    visibility: str = "private"
+    team_id: Optional[uuid.UUID] = None
+    can_edit_access: bool = False
+    public_share_url: Optional[str] = None

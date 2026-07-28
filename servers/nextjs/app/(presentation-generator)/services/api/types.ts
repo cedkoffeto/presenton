@@ -50,6 +50,9 @@ export interface Theme {
     logo_url?: string; // preview url
     company_name?: string;
     data: any;
+    visibility?: "private" | "team" | "public";
+    team_id?: string | null;
+    public_share_url?: string | null;
 }
 export interface ThemeParams {
     id?: string;
@@ -59,6 +62,7 @@ export interface ThemeParams {
     logo_url?: string | null; // preview url
     data: any;
     company_name?: string | null;
+    visibility?: "private" | "team" | "public";
 }
 
 

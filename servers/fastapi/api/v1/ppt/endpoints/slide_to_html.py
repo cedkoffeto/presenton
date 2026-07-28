@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.sql.presentation_layout_code import PresentationLayoutCodeModel
 from models.sql.template import TemplateModel
 from services.database import get_async_session
+from utils.request_auth import get_request_actor
 
 LAYOUT_MANAGEMENT_ROUTER = APIRouter(
     prefix="/template-management", tags=["template-management"]
@@ -377,10 +378,15 @@ async def create_template(
 
 @LAYOUT_MANAGEMENT_ROUTER.delete("/delete-templates/{template_id}", status_code=204)
 async def delete_template(
+    request: Request,
     template_id: UUID,
     session: AsyncSession = Depends(get_async_session),
 ):
     try:
+        actor = get_request_actor(request)
+        template = await session.get(TemplateModel, template_id)
+        if template and template.owner_user_id != actor.owner_user_id:
+            raise HTTPException(status_code=404, detail="Template not found")
         await session.execute(
             delete(TemplateModel).where(TemplateModel.id == template_id)
         )
@@ -390,5 +396,7 @@ async def delete_template(
             )
         )
         await session.commit()
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to delete template")

@@ -3,12 +3,19 @@ import React, { useEffect } from "react";
 
 import { Card } from "@/components/ui/card";
 import { DashboardApi } from "@/app/(presentation-generator)/services/api/dashboard";
-import { AlertTriangle, EllipsisVertical, Loader2, Trash } from "lucide-react";
+import { AlertTriangle, EllipsisVertical, Globe2, Loader2, Lock, Trash, Users } from "lucide-react";
 import {
   Popover,
   PopoverTrigger,
   PopoverContent,
 } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { usePathname, useRouter } from "next/navigation";
 import { notify } from "@/components/ui/sonner";
 
@@ -16,6 +23,32 @@ import { useFontLoader } from "@/app/(presentation-generator)/hooks/useFontLoad"
 import SlideScale from "@/app/(presentation-generator)/components/PresentationRender";
 import MarkdownRenderer from "@/components/MarkDownRender";
 import { trackEvent, MixpanelEvent } from "@/utils/mixpanel";
+
+type PresentationVisibility = "private" | "team" | "public";
+
+const VISIBILITY_OPTIONS: Array<{
+  value: PresentationVisibility;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { value: "private", label: "Private", icon: Lock },
+  { value: "team", label: "Team", icon: Users },
+  { value: "public", label: "Public", icon: Globe2 },
+];
+
+const VisibilityBadge = ({ visibility }: { visibility: PresentationVisibility }) => {
+  const option =
+    VISIBILITY_OPTIONS.find((item) => item.value === visibility) ||
+    VISIBILITY_OPTIONS[0];
+  const Icon = option.icon;
+
+  return (
+    <span className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[#E6E8EC] bg-white px-2.5 text-xs font-medium capitalize text-[#5B5F66]">
+      <Icon className="h-3.5 w-3.5" />
+      {option.label}
+    </span>
+  );
+};
 
 export const PresentationCard = ({
   id,
@@ -32,6 +65,15 @@ export const PresentationCard = ({
   const pathname = usePathname();
   const [showDeleteDialog, setShowDeleteDialog] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
+  const [visibility, setVisibility] = React.useState<PresentationVisibility>(
+    presentation?.visibility || "private"
+  );
+  const [isUpdatingAccess, setIsUpdatingAccess] = React.useState(false);
+  const canEditAccess = Boolean(presentation?.can_edit_access);
+
+  useEffect(() => {
+    setVisibility(presentation?.visibility || "private");
+  }, [presentation?.visibility]);
 
   const handlePreview = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -106,6 +148,29 @@ export const PresentationCard = ({
     }
     setIsDeleting(false);
   };
+
+  const handleAccessChange = async (nextVisibility: PresentationVisibility) => {
+    if (isUpdatingAccess || nextVisibility === visibility) return;
+
+    const previousVisibility = visibility;
+    setVisibility(nextVisibility);
+    setIsUpdatingAccess(true);
+
+    try {
+      const updated = await DashboardApi.updatePresentationAccess(id, nextVisibility);
+      setVisibility(updated.visibility || nextVisibility);
+      notify.success("Presentation access updated", `Visibility changed to ${nextVisibility}.`);
+    } catch (error) {
+      setVisibility(previousVisibility);
+      notify.error(
+        "Could not update access",
+        error instanceof Error ? error.message : "Something went wrong while updating presentation access."
+      );
+    } finally {
+      setIsUpdatingAccess(false);
+    }
+  };
+
   const firstSlide = presentation?.slides?.[0];
   return (
     <Card
@@ -128,14 +193,54 @@ export const PresentationCard = ({
         </div>
 
         <div className="w-full py-3 px-5 mt-auto z-40 relative bg-white  border-t border-[#EDEEEF]">
-          <div className="flex items-center justify-between gap-7 w-full">
+          <div className="flex items-start justify-between gap-4 w-full">
             <div className="flex flex-col items-start gap-1">
               <div className="text-sm text-[#191919] font-semibold  overflow-hidden line-clamp-1">
                 <MarkdownRenderer content={title} className="text-sm mb-0  font-syne text-[#191919] font-semibold  overflow-hidden line-clamp-1" />
               </div>
-              <p className="text-[#808080] text-sm font-syne">
-                {new Date(presentation?.created_at).toLocaleDateString()}
-              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[#808080] text-sm font-syne">
+                  {new Date(presentation?.created_at).toLocaleDateString()}
+                </p>
+                {canEditAccess ? (
+                  <Select
+                    value={visibility}
+                    onValueChange={(value) =>
+                      void handleAccessChange(value as PresentationVisibility)
+                    }
+                    disabled={isUpdatingAccess}
+                  >
+                    <SelectTrigger
+                      className="h-7 w-[106px] rounded-full border-[#E6E8EC] bg-white px-2.5 py-0 text-xs font-medium text-[#4D5158] shadow-none focus:ring-0"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent
+                      align="start"
+                      className="z-[70] bg-white"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {VISIBILITY_OPTIONS.map((option) => {
+                        const Icon = option.icon;
+                        return (
+                          <SelectItem key={option.value} value={option.value}>
+                            <span className="flex items-center gap-2">
+                              <Icon className="h-4 w-4" />
+                              {option.label}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <VisibilityBadge visibility={visibility} />
+                )}
+              </div>
 
             </div>
             <Popover>

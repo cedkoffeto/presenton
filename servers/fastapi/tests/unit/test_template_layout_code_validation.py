@@ -12,11 +12,14 @@ from fastapi import HTTPException
 from models.sql.presentation_layout_code import PresentationLayoutCodeModel
 from models.sql.template import TemplateModel
 from models.sql.template_create_info import TemplateCreateInfoModel
+from models.sql.team import TeamModel
+from models.sql.user import UserModel
 from templates import handler as template_handler
 from templates.layout_code_validation import (
     LayoutCodeValidationError,
     ValidatedLayoutCode,
 )
+from utils.access_control import AuthActor
 
 
 @dataclass
@@ -85,6 +88,21 @@ def _validated(code: str = "validated-code") -> ValidatedLayoutCode:
     )
 
 
+_USER_ID = uuid.uuid4()
+_TEAM_ID = uuid.uuid4()
+
+
+def _actor() -> AuthActor:
+    return AuthActor(
+        user=UserModel(id=_USER_ID, username="tester"),
+        team=TeamModel(id=_TEAM_ID, slug="team", name="Team"),
+    )
+
+
+def _request():
+    return type("Request", (), {"state": type("State", (), {"auth_actor": _actor()})()})()
+
+
 async def _invalid_validator(_code: str):
     raise LayoutCodeValidationError("Unexpected token", line=2, column=5)
 
@@ -102,6 +120,8 @@ def test_save_template_rejects_invalid_layout_before_commit(monkeypatch):
             pptx_url="/tmp/test.pptx",
             slide_htmls=["<div />"],
             slide_image_urls=["/tmp/test.png"],
+            owner_user_id=_USER_ID,
+            team_id=_TEAM_ID,
         )
     )
     monkeypatch.setattr(template_handler, "validate_layout_code", _invalid_validator)
@@ -119,7 +139,7 @@ def test_save_template_rejects_invalid_layout_before_commit(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(template_handler.save_template(request, session))
+        asyncio.run(template_handler.save_template(_request(), request, session))
 
     assert exc_info.value.status_code == 400
     assert session.commit_count == 0
@@ -129,7 +149,14 @@ def test_save_template_rejects_invalid_layout_before_commit(monkeypatch):
 
 def test_update_template_rejects_invalid_layout_before_delete(monkeypatch):
     template_id = uuid.uuid4()
-    session = _TemplateSession(template=TemplateModel(id=template_id, name="Template"))
+    session = _TemplateSession(
+        template=TemplateModel(
+            id=template_id,
+            name="Template",
+            owner_user_id=_USER_ID,
+            team_id=_TEAM_ID,
+        )
+    )
     monkeypatch.setattr(template_handler, "validate_layout_code", _invalid_validator)
 
     request = template_handler.UpdateTemplateRequest(
@@ -144,7 +171,7 @@ def test_update_template_rejects_invalid_layout_before_delete(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(template_handler.update_template(request, session))
+        asyncio.run(template_handler.update_template(_request(), request, session))
 
     assert exc_info.value.status_code == 400
     assert session.execute_count == 0
@@ -163,7 +190,12 @@ def test_save_slide_layout_rejects_invalid_code_without_replacing_existing(
         layout_code="previous-valid-code",
     )
     session = _TemplateSession(
-        template=TemplateModel(id=template_id, name="Template"),
+        template=TemplateModel(
+            id=template_id,
+            name="Template",
+            owner_user_id=_USER_ID,
+            team_id=_TEAM_ID,
+        ),
         layout=layout,
     )
     monkeypatch.setattr(template_handler, "validate_layout_code", _invalid_validator)
@@ -175,10 +207,62 @@ def test_save_slide_layout_rejects_invalid_code_without_replacing_existing(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(template_handler.save_slide_layout(request, session))
+        asyncio.run(template_handler.save_slide_layout(_request(), request, session))
 
     assert exc_info.value.status_code == 400
     assert layout.layout_code == "previous-valid-code"
+    assert session.commit_count == 0
+
+
+def test_update_template_access_allows_owner_to_share_with_team():
+    template_id = uuid.uuid4()
+    template = TemplateModel(
+        id=template_id,
+        name="Template",
+        owner_user_id=_USER_ID,
+        team_id=_TEAM_ID,
+    )
+    session = _TemplateSession(template=template)
+
+    response = asyncio.run(
+        template_handler.update_template_access(
+            _request(),
+            template_id,
+            template_handler.UpdateTemplateAccessRequest(visibility="team"),
+            session,
+        )
+    )
+
+    assert response.visibility == "team"
+    assert response.team_id == str(_TEAM_ID)
+    assert response.can_edit_access is True
+    assert template.visibility == "team"
+    assert template.team_id == _TEAM_ID
+    assert session.commit_count == 1
+
+
+def test_update_template_access_rejects_unknown_visibility():
+    template_id = uuid.uuid4()
+    session = _TemplateSession(
+        template=TemplateModel(
+            id=template_id,
+            name="Template",
+            owner_user_id=_USER_ID,
+            team_id=_TEAM_ID,
+        )
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            template_handler.update_template_access(
+                _request(),
+                template_id,
+                template_handler.UpdateTemplateAccessRequest(visibility="company"),
+                session,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
     assert session.commit_count == 0
 
 
@@ -191,6 +275,8 @@ def test_save_template_persists_normalized_validated_code(monkeypatch):
             pptx_url="/tmp/test.pptx",
             slide_htmls=["<div />"],
             slide_image_urls=["/tmp/test.png"],
+            owner_user_id=_USER_ID,
+            team_id=_TEAM_ID,
         )
     )
     monkeypatch.setattr(template_handler, "validate_layout_code", _valid_validator)
@@ -207,7 +293,7 @@ def test_save_template_persists_normalized_validated_code(monkeypatch):
         ],
     )
 
-    response = asyncio.run(template_handler.save_template(request, session))
+    response = asyncio.run(template_handler.save_template(_request(), request, session))
 
     assert response.name == "Template"
     assert session.commit_count == 1

@@ -13,11 +13,14 @@ from fastapi import HTTPException
 from openai import APIError as OpenAIAPIError
 
 from models.api_error_model import APIErrorModel
+from models.generate_presentation_request import GeneratePresentationRequest
 from models.image_prompt import ImagePrompt
+from models.presentation_from_template import EditPresentationRequest, SlideContentUpdate
 from models.presentation_outline_model import PresentationOutlineModel, SlideOutlineModel
 from models.presentation_structure_model import PresentationStructureModel
 from models.sql.presentation import PresentationModel
 from models.sql.slide import SlideModel
+from models.sql.theme import ThemeModel
 from models.sql.integration_client import IntegrationClientModel
 from models.sql.user import UserModel
 from models.sse_response import (
@@ -32,6 +35,7 @@ from api.v1.ppt.endpoints import presentation as presentation_endpoint
 from services.chat.conversation_store import ChatConversationStore
 from services.concurrent_service import ConcurrentService
 from services.export_task_service import EXPORT_TASK_SERVICE
+from services.resource_catalog_service import RESOURCE_CATALOG_SERVICE
 from templates import get_layout_by_name as tpl_layout_fetcher
 from templates.presentation_layout import PresentationLayoutModel, SlideLayoutModel
 from utils import ocr_language
@@ -103,9 +107,97 @@ def _outline_layout_structure_payloads() -> tuple[dict, dict, dict]:
     return outline, layout_payload, structure_payload
 
 
+class _ThemeScalarResult:
+    def __init__(self, theme):
+        self.theme = theme
+
+    def first(self):
+        return self.theme
+
+
+class _ThemeLookupSession:
+    def __init__(self, theme):
+        self.theme = theme
+
+    async def get(self, model, key):
+        if model is ThemeModel and self.theme and self.theme.id == key:
+            return self.theme
+        return None
+
+    async def scalar(self, *_args, **_kwargs):
+        return self.theme
+
+
 def test_get_current_utc_datetime_is_timezone_aware():
     dt = get_current_utc_datetime()
     assert dt.tzinfo is not None
+
+
+def test_resolve_request_theme_looks_up_saved_theme_by_name():
+    user = UserModel(id=uuid.uuid4(), username="tester")
+    actor = AuthActor(user=user, team=None)
+    theme = ThemeModel(
+        id=uuid.uuid4(),
+        name="Brand Theme",
+        description="Saved brand theme",
+        data={"colors": {"graph_0": "#111111"}},
+        owner_user_id=user.id,
+        visibility="private",
+    )
+
+    resolved = asyncio.run(
+        presentation_endpoint._resolve_request_theme(
+            GeneratePresentationRequest(
+                content="Generate a deck",
+                theme_name="Brand Theme",
+            ),
+            actor,
+            _ThemeLookupSession(theme),
+        )
+    )
+
+    assert resolved["id"] == str(theme.id)
+    assert resolved["name"] == "Brand Theme"
+    assert resolved["data"] == {"colors": {"graph_0": "#111111"}}
+
+
+def test_resolve_request_theme_rejects_ambiguous_selectors():
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            presentation_endpoint._resolve_request_theme(
+                GeneratePresentationRequest(
+                    content="Generate a deck",
+                    theme={"name": "Inline", "data": {}},
+                    theme_name="Brand Theme",
+                ),
+                AuthActor(user=UserModel(id=uuid.uuid4(), username="tester"), team=None),
+                _ThemeLookupSession(None),
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+def test_resource_catalog_parses_semantic_hits():
+    theme_id = uuid.uuid4()
+    template_id = uuid.uuid4()
+
+    hits = RESOURCE_CATALOG_SERVICE._parse_hits(
+        {
+            "results": [
+                {"memory": f"[presenton_catalog_resource]\nkind=theme id={theme_id}"},
+                {"memory": f"[presenton_catalog_resource]\nkind=template id={template_id}"},
+                {"memory": f"[presenton_catalog_resource]\nkind=theme id={theme_id}"},
+                {"memory": "not a catalog hit"},
+            ]
+        },
+        kind="all",
+    )
+
+    assert [(hit.kind, hit.id) for hit in hits] == [
+        ("theme", theme_id),
+        ("template", template_id),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -159,6 +251,28 @@ def test_slide_model_get_new_slide_branches():
     )
     assert base.get_new_slide(pid, None).content == {"a": 1}
     assert base.get_new_slide(pid, {"b": 2}).content == {"b": 2}
+
+
+def test_extract_slide_asset_urls_collects_nested_media():
+    assets = presentation_endpoint._extract_slide_asset_urls(
+        {
+            "hero": {
+                "__image_url__": "/app_data/images/a.png",
+                "sourceUrl": "https://example.test/source",
+            },
+            "items": [
+                {"icon": {"__icon_url__": "/static/icons/bold/check.png"}},
+                {"thumbnail_url": "/app_data/images/a.png"},
+            ],
+        }
+    )
+
+    assert assets["images"] == ["/app_data/images/a.png"]
+    assert assets["icons"] == ["/static/icons/bold/check.png"]
+    assert assets["media"] == [
+        "https://example.test/source",
+        "/app_data/images/a.png",
+    ]
 
 
 def test_sse_response_frame_format():
@@ -346,6 +460,69 @@ def test_update_presentation_rejects_non_owner():
         )
 
     assert exc.value.status_code == 404
+
+
+def test_edit_presentation_async_queues_status_task():
+    user = UserModel(id=uuid.uuid4(), username="owner", is_admin=False)
+    presentation = PresentationModel(
+        id=uuid.uuid4(),
+        content="c",
+        n_slides=1,
+        language="English",
+        owner_user_id=user.id,
+        visibility="private",
+    )
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.commit_count = 0
+
+        async def get(self, model, _key):
+            if model is PresentationModel:
+                return presentation
+            return None
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            self.commit_count += 1
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, fn, *args):
+            self.tasks.append((fn, args))
+
+    request = MagicMock()
+    request.headers = {}
+    request.state.auth_actor = AuthActor(user=user, team=None)
+    background_tasks = FakeBackgroundTasks()
+    session = FakeSession()
+    payload = EditPresentationRequest(
+        presentation_id=presentation.id,
+        slides=[SlideContentUpdate(index=0, content={"title": "Updated"})],
+    )
+
+    response = asyncio.run(
+        presentation_endpoint.edit_presentation_with_new_content_async(
+            request,
+            payload,
+            background_tasks,
+            sql_session=session,
+        )
+    )
+
+    assert response.status == "pending"
+    assert response.message == "Queued for presentation edit"
+    assert response.owner_user_id == user.id
+    assert session.commit_count == 1
+    assert len(background_tasks.tasks) == 1
+    queued_fn, queued_args = background_tasks.tasks[0]
+    assert queued_fn == presentation_endpoint._edit_presentation_async_background
+    assert queued_args[0] == payload
 
 
 def test_presentation_model_set_structure_updates_slides():

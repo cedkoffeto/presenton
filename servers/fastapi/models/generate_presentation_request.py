@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from enums.tone import Tone
@@ -28,6 +28,18 @@ class GeneratePresentationRequest(BaseModel):
     )
     template: str = Field(
         default="general", description="Template to use for the presentation"
+    )
+    theme: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Full theme payload to apply to the generated presentation",
+    )
+    theme_id: Optional[str] = Field(
+        default=None,
+        description="Saved theme id to apply to the generated presentation",
+    )
+    theme_name: Optional[str] = Field(
+        default=None,
+        description="Saved theme name to apply to the generated presentation",
     )
     include_table_of_contents: bool = Field(
         default=False, description="Whether to include a table of contents"

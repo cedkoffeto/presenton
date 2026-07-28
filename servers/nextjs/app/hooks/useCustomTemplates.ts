@@ -14,6 +14,9 @@ export interface TemplateSummary {
     id: string;
     name: string;
     total_layouts: number;
+    visibility?: "private" | "team" | "public";
+    team_id?: string | null;
+    can_edit_access?: boolean;
 }
 
 export interface RawLayoutResponse {
@@ -58,6 +61,10 @@ export interface CustomTemplates {
     layoutCount: number;
 
     isCustom: true;
+
+    visibility: "private" | "team" | "public";
+
+    canEditAccess: boolean;
 }
 
 // GLOBAL CACHE
@@ -227,6 +234,8 @@ export function useCustomTemplateSummaries() {
                     name: item.name || "Custom Template",
                     layoutCount: item.total_layouts,
                     isCustom: true as const,
+                    visibility: item.visibility || "private",
+                    canEditAccess: Boolean(item.can_edit_access),
                 }
             });
 
@@ -403,7 +412,7 @@ export function useCustomTemplatePreview(presentationId: string) {
                         if (result) {
                             compiled.push(result);
                         }
-                    } catch (e) {
+                    } catch {
                         console.warn(`Failed to compile preview: ${layout.layout_name}`);
                     }
                 }

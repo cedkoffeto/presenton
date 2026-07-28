@@ -419,10 +419,17 @@ export function compileTemplateSchema(
 
     return {
       layoutDescription:
-        readStringDeclaration(declarations, "layoutDescription") ?? "",
-      layoutId: readStringDeclaration(declarations, "layoutId") ?? "custom-layout",
+        readStringDeclaration(declarations, "slideLayoutDescription") ??
+        readStringDeclaration(declarations, "layoutDescription") ??
+        "",
+      layoutId:
+        readStringDeclaration(declarations, "slideLayoutId") ??
+        readStringDeclaration(declarations, "layoutId") ??
+        "custom-layout",
       layoutName:
-        readStringDeclaration(declarations, "layoutName") ?? "Custom Layout",
+        readStringDeclaration(declarations, "slideLayoutName") ??
+        readStringDeclaration(declarations, "layoutName") ??
+        "Custom Layout",
       schemaJSON: z.toJSONSchema(schema),
     };
   } catch (error) {

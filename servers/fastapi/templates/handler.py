@@ -18,6 +18,7 @@ from models.sql.template import TemplateModel
 from models.sql.template_create_info import TemplateCreateInfoModel
 from services.database import async_session_maker, get_async_session
 from services.export_task_service import EXPORT_TASK_SERVICE
+from services.resource_catalog_service import RESOURCE_CATALOG_SERVICE
 from templates.example import build_template_example
 from templates.get_layout_by_name import get_layout_by_name
 from templates.layout_code_validation import (
@@ -44,6 +45,7 @@ from templates.slide_layout_jobs import (
     get_slide_layout_job,
 )
 from utils.access_control import (
+    ALLOWED_VISIBILITIES,
     VISIBILITY_PRIVATE,
     VISIBILITY_PUBLIC,
     VISIBILITY_TEAM,
@@ -65,6 +67,9 @@ class TemplateDetail(BaseModel):
     id: str
     name: str
     total_layouts: Optional[int] = None
+    visibility: str = VISIBILITY_PRIVATE
+    team_id: Optional[str] = None
+    can_edit_access: bool = False
 
 
 class TemplateLayoutData(BaseModel):
@@ -81,6 +86,9 @@ class TemplateData(BaseModel):
     name: str
     description: Optional[str] = None
     created_at: datetime
+    visibility: str = VISIBILITY_PRIVATE
+    team_id: Optional[str] = None
+    can_edit_access: bool = False
 
 
 class GetTemplateLayoutsResponse(BaseModel):
@@ -146,6 +154,9 @@ class SaveTemplateResponse(BaseModel):
     name: str
     description: Optional[str] = None
     created_at: datetime
+    visibility: str = VISIBILITY_PRIVATE
+    team_id: Optional[str] = None
+    can_edit_access: bool = False
 
 
 class CloneTemplateRequest(BaseModel):
@@ -157,6 +168,10 @@ class CloneTemplateRequest(BaseModel):
 class UpdateTemplateRequest(BaseModel):
     id: uuid.UUID
     layouts: List[SaveTemplateLayoutData]
+
+
+class UpdateTemplateAccessRequest(BaseModel):
+    visibility: str
 
 
 class SaveSlideLayoutRequest(BaseModel):
@@ -284,6 +299,18 @@ def _validation_error_message(exc: LayoutCodeValidationError) -> str:
     return f"{exc.error}{location}"
 
 
+def _require_resource_owner(actor, owner_user_id: Optional[uuid.UUID]) -> None:
+    if not owner_user_id or owner_user_id != actor.owner_user_id:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+
+def _validate_visibility(visibility: str) -> str:
+    normalized = (visibility or "").strip().lower()
+    if normalized not in ALLOWED_VISIBILITIES:
+        raise HTTPException(status_code=400, detail="Invalid visibility")
+    return normalized
+
+
 def _validation_repair_user_text(
     *,
     original_user_text: str,
@@ -403,6 +430,9 @@ async def get_all_templates(
         select(
             TemplateModel.id,
             TemplateModel.name,
+            TemplateModel.owner_user_id,
+            TemplateModel.team_id,
+            TemplateModel.visibility,
             func.count(PresentationLayoutCodeModel.id).label("total_layouts"),
         )
         .join(
@@ -419,7 +449,13 @@ async def get_all_templates(
                 ),
             )
         )
-        .group_by(TemplateModel.id, TemplateModel.name)
+        .group_by(
+            TemplateModel.id,
+            TemplateModel.name,
+            TemplateModel.owner_user_id,
+            TemplateModel.team_id,
+            TemplateModel.visibility,
+        )
     )
     rows = result.all()
 
@@ -434,8 +470,11 @@ async def get_all_templates(
             id=f"custom-{template_id}",
             name=template_name,
             total_layouts=total_layouts,
+            visibility=visibility,
+            team_id=str(team_id) if team_id else None,
+            can_edit_access=owner_user_id == actor.owner_user_id,
         )
-        for template_id, template_name, total_layouts in rows
+        for template_id, template_name, owner_user_id, team_id, visibility, total_layouts in rows
     )
     return templates
 
@@ -482,6 +521,9 @@ async def get_layouts(
             name=template_meta.name,
             description=template_meta.description,
             created_at=template_meta.created_at,
+            visibility=template_meta.visibility,
+            team_id=str(template_meta.team_id) if template_meta.team_id else None,
+            can_edit_access=template_meta.owner_user_id == actor.owner_user_id,
         )
 
     layouts = [
@@ -791,12 +833,16 @@ async def save_template(
     )
     await sql_session.commit()
     await sql_session.refresh(template)
+    await RESOURCE_CATALOG_SERVICE.index_template(template, sql_session)
 
     return SaveTemplateResponse(
         id=template.id,
         name=template.name,
         description=template.description,
         created_at=template.created_at,
+        visibility=template.visibility,
+        team_id=str(template.team_id) if template.team_id else None,
+        can_edit_access=True,
     )
 
 
@@ -864,12 +910,16 @@ async def clone_template(
     )
     await sql_session.commit()
     await sql_session.refresh(new_template)
+    await RESOURCE_CATALOG_SERVICE.index_template(new_template, sql_session)
 
     return SaveTemplateResponse(
         id=new_template.id,
         name=new_template.name,
         description=new_template.description,
         created_at=new_template.created_at,
+        visibility=new_template.visibility,
+        team_id=str(new_template.team_id) if new_template.team_id else None,
+        can_edit_access=True,
     )
 
 
@@ -925,12 +975,49 @@ async def update_template(
         ]
     )
     await sql_session.commit()
+    await RESOURCE_CATALOG_SERVICE.index_template(template, sql_session)
 
     return SaveTemplateResponse(
         id=template.id,
         name=template.name,
         description=template.description,
         created_at=template.created_at,
+        visibility=template.visibility,
+        team_id=str(template.team_id) if template.team_id else None,
+        can_edit_access=template.owner_user_id == actor.owner_user_id,
+    )
+
+
+async def update_template_access(
+    request_http: Request,
+    template_id: uuid.UUID,
+    request: UpdateTemplateAccessRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    actor = get_request_actor(request_http)
+    template = await sql_session.get(TemplateModel, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    _require_resource_owner(actor, template.owner_user_id)
+
+    visibility = _validate_visibility(request.visibility)
+    template.visibility = visibility
+    template.team_id = actor.team_id if visibility == VISIBILITY_TEAM else template.team_id
+    template.share_token = generate_share_token() if visibility == VISIBILITY_PUBLIC else None
+
+    sql_session.add(template)
+    await sql_session.commit()
+    await sql_session.refresh(template)
+    await RESOURCE_CATALOG_SERVICE.index_template(template, sql_session)
+
+    return SaveTemplateResponse(
+        id=template.id,
+        name=template.name,
+        description=template.description,
+        created_at=template.created_at,
+        visibility=template.visibility,
+        team_id=str(template.team_id) if template.team_id else None,
+        can_edit_access=True,
     )
 
 
