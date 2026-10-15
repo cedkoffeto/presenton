@@ -111,6 +111,7 @@ services:
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_OVERRIDE_FROM_ENV=${AUTH_OVERRIDE_FROM_ENV:-}
       - RESET_AUTH=${RESET_AUTH:-}
+      - PUBLIC_EXPORT_DOWNLOADS=${PUBLIC_EXPORT_DOWNLOADS:-}
 
   production-gpu:
     # image: ghcr.io/presenton/presenton:latest
@@ -229,6 +230,7 @@ services:
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_OVERRIDE_FROM_ENV=${AUTH_OVERRIDE_FROM_ENV:-}
       - RESET_AUTH=${RESET_AUTH:-}
+      - PUBLIC_EXPORT_DOWNLOADS=${PUBLIC_EXPORT_DOWNLOADS:-}
 
   development:
     build:
@@ -343,6 +345,7 @@ services:
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_OVERRIDE_FROM_ENV=${AUTH_OVERRIDE_FROM_ENV:-}
       - RESET_AUTH=${RESET_AUTH:-}
+      - PUBLIC_EXPORT_DOWNLOADS=${PUBLIC_EXPORT_DOWNLOADS:-}
 
   development-gpu:
     build:
@@ -462,6 +465,7 @@ services:
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_OVERRIDE_FROM_ENV=${AUTH_OVERRIDE_FROM_ENV:-}
       - RESET_AUTH=${RESET_AUTH:-}
+      - PUBLIC_EXPORT_DOWNLOADS=${PUBLIC_EXPORT_DOWNLOADS:-}
 
 volumes:
   presenton_root_node_modules:

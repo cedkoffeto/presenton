@@ -10,6 +10,14 @@ const CONTENT_TYPES: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+function isTruthyEnv(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+function publicExportDownloadsEnabled(): boolean {
+  return isTruthyEnv(process.env.PUBLIC_EXPORT_DOWNLOADS);
+}
+
 function getFastApiBaseUrl(): string {
   const internal = process.env.FAST_API_INTERNAL_URL?.trim();
   if (internal) {
@@ -65,23 +73,25 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const presentationUrl = new URL(
-      `${getFastApiBaseUrl()}/api/v1/ppt/presentation/${encodeURIComponent(
-        presentationId
-      )}`
-    );
-    if (shareToken) {
-      presentationUrl.searchParams.set("share_token", shareToken);
-    }
-    const authResponse = await fetch(presentationUrl, {
-      method: "GET",
-      headers: request.headers.get("cookie")
-        ? { cookie: request.headers.get("cookie") as string }
-        : undefined,
-      cache: "no-store",
-    });
-    if (!authResponse.ok) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: authResponse.status });
+    if (!publicExportDownloadsEnabled()) {
+      const presentationUrl = new URL(
+        `${getFastApiBaseUrl()}/api/v1/ppt/presentation/${encodeURIComponent(
+          presentationId
+        )}`
+      );
+      if (shareToken) {
+        presentationUrl.searchParams.set("share_token", shareToken);
+      }
+      const authResponse = await fetch(presentationUrl, {
+        method: "GET",
+        headers: request.headers.get("cookie")
+          ? { cookie: request.headers.get("cookie") as string }
+          : undefined,
+        cache: "no-store",
+      });
+      if (!authResponse.ok) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: authResponse.status });
+      }
     }
 
     const exportsDirectory = getExportsDirectory();

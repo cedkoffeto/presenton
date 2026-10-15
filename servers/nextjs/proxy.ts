@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAuthDisabled } from "@/utils/auth";
 
 /**
- * API-only: session required for all /api/* except auth, telemetry, and
- * /api/template (server-to-server template layout for FastAPI fallback).
+ * API-only: session required for all /api/* except auth, telemetry,
+ * explicitly public export downloads, and /api/template
+ * (server-to-server template layout for FastAPI fallback).
  * Page routes are protected in server layouts (unknown URLs still 404; login uses relative redirects).
  */
 function getFastApiBaseUrl(): string {
@@ -28,6 +29,15 @@ type AuthStatus = {
 
 const SESSION_COOKIE_NAME = "presenton_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const PUBLIC_EXPORT_DOWNLOAD_PATH = "/api/export-presentation/file";
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+function publicExportDownloadsEnabled(): boolean {
+  return isTruthyEnv(process.env.PUBLIC_EXPORT_DOWNLOADS);
+}
 
 async function getAuthStatus(request: NextRequest): Promise<AuthStatus> {
   const cookieHeader = request.headers.get("cookie");
@@ -64,6 +74,14 @@ function isApiAuthExempt(pathname: string): boolean {
   );
 }
 
+function isPublicExportDownload(request: NextRequest): boolean {
+  return (
+    request.method === "GET" &&
+    request.nextUrl.pathname === PUBLIC_EXPORT_DOWNLOAD_PATH &&
+    publicExportDownloadsEnabled()
+  );
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -95,7 +113,11 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (request.method === "OPTIONS" || isApiAuthExempt(pathname)) {
+  if (
+    request.method === "OPTIONS" ||
+    isApiAuthExempt(pathname) ||
+    isPublicExportDownload(request)
+  ) {
     return NextResponse.next();
   }
 
